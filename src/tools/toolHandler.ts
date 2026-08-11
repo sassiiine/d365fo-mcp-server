@@ -2,7 +2,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { XppServerContext } from '../types/context.js';
 import { getConfigManager } from '../utils/configManager.js';
-import { SERVER_MODE, LOCAL_TOOLS } from '../server/serverMode.js';
+import { SERVER_MODE, LOCAL_TOOLS, ALWAYS_TOOLS } from '../server/serverMode.js';
 import { searchUnifiedTool } from './searchUnified.js';
 import { batchGetInfoTool } from './batchGetInfo.js';
 import { getObjectInfoTool } from './getObjectInfo.js';
@@ -175,7 +175,10 @@ export function registerToolHandler(server: Server, context: XppServerContext): 
         isError: true,
       };
     }
-    if (SERVER_MODE === 'write-only' && !LOCAL_TOOLS.has(toolName)) {
+    // ALWAYS_TOOLS are published in every mode (see serverMode.ts), so the
+    // write-only gate must exempt them too — otherwise they are advertised by
+    // tools/list but rejected here, and the local companion cannot write at all.
+    if (SERVER_MODE === 'write-only' && !LOCAL_TOOLS.has(toolName) && !ALWAYS_TOOLS.has(toolName)) {
       return {
         content: [{ type: 'text', text: `⚠️ Tool '${toolName}' is not available in write-only mode.\n\nThis local MCP server only handles file operations. Search and analysis tools are provided by the Azure MCP server.` }],
         isError: true,

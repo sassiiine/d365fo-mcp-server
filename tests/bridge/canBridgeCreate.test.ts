@@ -30,10 +30,22 @@ describe('canBridgeCreate', () => {
     expect(canBridgeCreate('view')).toBe(false);
   });
 
+  it('excludes form (TOOL_DEFECT)', () => {
+    // Regression: CreateForm carries only the scalar caption, so the file it
+    // wrote had an empty <Methods/>, <DataSources/> and <Controls/> whatever
+    // pattern/dataSource/gridFields were asked for. With no classDeclaration
+    // method the form cannot compile at all ("The 'classDeclaration' is missing
+    // from element 'X'"), so the bridge path could never succeed. Creation must
+    // fall through to FormPatternTemplates (2026-07-24, RMEX Owners run).
+    expect(canBridgeCreate('form')).toBe(false);
+    // form-EXTENSION is a different code path and still goes through the bridge.
+    expect(canBridgeCreate('form-extension')).toBe(true);
+  });
+
   it('still accepts the core bridge-backed types', () => {
     expect(canBridgeCreate('class')).toBe(true);
     expect(canBridgeCreate('table')).toBe(true);
-    expect(canBridgeCreate('form')).toBe(true);
+    expect(canBridgeCreate('edt')).toBe(true);
     expect(canBridgeCreate('menu-item-display')).toBe(true);
     expect(canBridgeCreate('Table')).toBe(true);
   });

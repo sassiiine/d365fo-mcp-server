@@ -936,7 +936,7 @@ export async function bridgeResolveObject(
 
 /**
  * Supported object types for bridge-based creation.
- * Covers core types + menu items + extensions + form + menu.
+ * Covers core types + menu items + extensions + menu.
  * Complex types (report, data-entity, business-event, tile, kpi) continue
  * using TypeScript XML generation — the bridge handles them via xmlContent passthrough.
  *
@@ -958,10 +958,19 @@ export async function bridgeResolveObject(
  * <DataSources/> (query) or no <Query> reference at all (view) — a query/view
  * that can select nothing. The local generators (queryViewXml.ts) build a
  * real AxQuerySimpleRootDataSource / <Query> reference from these properties.
+ *
+ * form is DELIBERATELY excluded for the same reason (found 2026-07-24 on the
+ * RMEX Owners run, reproducing the 2026-07-23 baseline failure): CreateForm
+ * carries only the scalar caption, so the file it writes has an EMPTY
+ * <Methods/>, <DataSources/> and <Controls/> no matter what pattern,
+ * dataSource or gridFields were asked for. That is not merely incomplete — a
+ * form with no classDeclaration method fails xppc outright ("The
+ * 'classDeclaration' is missing from element 'X'"), so the bridge path could
+ * never produce a compiling form. FormPatternTemplates builds the real
+ * pattern-compliant skeleton; let creation fall through to it.
  */
 const BRIDGE_CREATE_TYPES = new Set([
   'class', 'class-extension', 'table', 'enum', 'edt',
-  'form',
   'table-extension', 'form-extension', 'enum-extension',
   'menu',
   'menu-item-action', 'menu-item-display', 'menu-item-output',

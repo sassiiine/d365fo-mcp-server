@@ -19,6 +19,7 @@ import { enforceGrounding } from '../utils/provenanceStore.js';
 import { gateOnFormPatternErrors, isFormPatternEnforceEnabled } from './validateFormPattern.js';
 import { validateFormExtensionControlShape, buildFormExtensionShapeError } from '../utils/formExtensionShapeValidator.js';
 import { FormPatternTemplates } from '../utils/formPatternTemplates.js';
+import { controlForTableField, type FieldControlMap } from '../utils/fieldControlTypes.js';
 import { gateOnReferenceErrors } from './resolveReferences.js';
 import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
 import { buildAxSecurityPrivilegeXml } from './securityPrivilegeXml.js';
@@ -234,6 +235,27 @@ function fieldTypeToAxType(fieldType: string, edtName?: string): string {
 }
 
 /**
+ * Build the field→form-control map a form template needs from the SAME field
+ * specs used to create the table (`[{ name, edt?, type?, fieldType?, enumType? }]`).
+ *
+ * Without it every generated control is an AxFormStringControl, which is a
+ * metadata error the moment the bound field is a date/real/enum. The symbol-index
+ * lookup in fieldControlTypes.ts cannot help here: a table created moments ago is
+ * not indexed yet, so the caller has to hand us the shapes.
+ */
+function buildFieldControlMap(specs: unknown): FieldControlMap | undefined {
+  if (!Array.isArray(specs) || specs.length === 0) return undefined;
+  const map: FieldControlMap = new Map();
+  for (const f of specs as Array<Record<string, any>>) {
+    if (!f?.name) continue;
+    const iType = f.fieldType
+      ?? fieldTypeToAxType(f.type || (f.enumType ? 'Enum' : 'String'), f.edt);
+    map.set(String(f.name).toLowerCase(), controlForTableField(iType, f.enumType));
+  }
+  return map;
+}
+
+/**
  * Normalize the flexible field specs accepted by the tool / XML generators
  * (`{ name, edt?, type?, fieldType?, extendedDataType?, enumType?, mandatory?, label? }`)
  * into the key shape the C# bridge's WriteFieldParam ACTUALLY deserializes.
@@ -261,7 +283,53 @@ export function normalizeFieldSpecsForBridge(
     if (f.enumType != null) out.enumType = f.enumType;
     if (f.mandatory != null) out.mandatory = f.mandatory;
     if (f.label != null) out.label = f.label;
+    if (f.helpText != null) out.helpText = f.helpText;
     if (f.stringSize != null) out.stringSize = f.stringSize;
+    return out;
+  });
+}
+
+/**
+ * Normalize index specs into the bridge's WriteIndexParam shape.
+ *
+ * CRITICAL: WriteIndexParam.Fields is a `List<string>`, but the documented tool
+ * input (and every other collection here) uses objects —
+ * `fields: [{ fieldName, direction? }]`. Handing the bridge the documented shape
+ * makes System.Text.Json throw while deserializing the whole create request, so
+ * bridgeCreateObject returns null and the ENTIRE table silently falls back to
+ * the TypeScript generator — losing the indexes AND the field groups with it.
+ * Accept either spelling and always emit plain field-name strings.
+ */
+export function normalizeIndexSpecsForBridge(
+  indexes: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  return indexes.map((ix) => {
+    const rawFields = ix.fields as Array<string | Record<string, unknown>> | undefined;
+    const out: Record<string, unknown> = { name: ix.name };
+    if (Array.isArray(rawFields)) {
+      out.fields = rawFields
+        .map(f => (typeof f === 'string' ? f : (f?.fieldName ?? f?.name ?? f?.dataField)))
+        .filter((f): f is string => typeof f === 'string' && f !== '');
+    }
+    if (ix.allowDuplicates != null) out.allowDuplicates = ix.allowDuplicates;
+    if (ix.alternateKey != null) out.alternateKey = ix.alternateKey;
+    return out;
+  });
+}
+
+/** Field-group specs: the bridge's WriteFieldGroupParam.Fields is also a List<string>. */
+export function normalizeFieldGroupSpecsForBridge(
+  groups: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  return groups.map((g) => {
+    const rawFields = g.fields as Array<string | Record<string, unknown>> | undefined;
+    const out: Record<string, unknown> = { name: g.name };
+    if (g.label != null) out.label = g.label;
+    if (Array.isArray(rawFields)) {
+      out.fields = rawFields
+        .map(f => (typeof f === 'string' ? f : (f?.fieldName ?? f?.name ?? f?.dataField)))
+        .filter((f): f is string => typeof f === 'string' && f !== '');
+    }
     return out;
   });
 }
@@ -673,7 +741,8 @@ ${methodsXml}\t</SourceCode>
     // accept an explicit AxTableField* i:type (fieldType), a primitive base type (type),
     // or infer AxTableFieldEnum from enumType — and always emit <EnumType> for enum fields.
     const fieldSpecs: Array<{
-      name: string; edt?: string; type?: string; fieldType?: string; enumType?: string; mandatory?: boolean; label?: string;
+      name: string; edt?: string; type?: string; fieldType?: string; enumType?: string; mandatory?: boolean;
+      label?: string; helpText?: string;
     }> = Array.isArray(properties?.fields) ? properties.fields : [];
 
     let fieldsXml: string;
@@ -690,6 +759,7 @@ ${methodsXml}\t</SourceCode>
         fieldsXml += `\t\t<AxTableField xmlns=""\n\t\t\ti:type="${iType}">\n`;
         fieldsXml += `\t\t\t<Name>${f.name}</Name>\n`;
         if (f.edt)       fieldsXml += `\t\t\t<ExtendedDataType>${f.edt}</ExtendedDataType>\n`;
+        if (f.helpText)  fieldsXml += `\t\t\t<HelpText>${f.helpText}</HelpText>\n`;
         if (f.label)     fieldsXml += `\t\t\t<Label>${f.label}</Label>\n`;
         if (f.mandatory) fieldsXml += `\t\t\t<Mandatory>Yes</Mandatory>\n`;
         if (f.enumType)  fieldsXml += `\t\t\t<EnumType>${f.enumType}</EnumType>\n`;
@@ -697,6 +767,52 @@ ${methodsXml}\t</SourceCode>
       }
       fieldsXml += '\t</Fields>\n';
     }
+
+    // Caller-supplied field groups, appended after the five Auto* groups every
+    // table carries. This path runs whenever the bridge is unavailable or its
+    // create threw — dropping the groups here made a "successful" create quietly
+    // produce a table the form's DataGroup controls cannot bind to.
+    const groupSpecs: Array<{ name: string; label?: string; fields?: Array<string | { fieldName?: string; name?: string }> }> =
+      Array.isArray(properties?.fieldGroups) ? properties.fieldGroups : [];
+    const fieldRefName = (f: string | { fieldName?: string; name?: string }) =>
+      typeof f === 'string' ? f : (f.fieldName ?? f.name ?? '');
+    const extraFieldGroupsXml = groupSpecs.map((g) => {
+      const refs = (g.fields ?? []).map(fieldRefName).filter(Boolean);
+      const inner = refs.length === 0
+        ? '\t\t\t<Fields />\n'
+        : '\t\t\t<Fields>\n'
+          + refs.map(r => `\t\t\t\t<AxTableFieldGroupField>\n\t\t\t\t\t<DataField>${r}</DataField>\n\t\t\t\t</AxTableFieldGroupField>\n`).join('')
+          + '\t\t\t</Fields>\n';
+      return `\t\t<AxTableFieldGroup>\n\t\t\t<Name>${g.name}</Name>\n`
+        + (g.label ? `\t\t\t<Label>${g.label}</Label>\n` : '')
+        + inner
+        + `\t\t</AxTableFieldGroup>\n`;
+    }).join('');
+
+    // Caller-supplied indexes — same silent-drop problem as the field groups.
+    const indexSpecs: Array<{
+      name: string; allowDuplicates?: boolean; alternateKey?: boolean;
+      fields?: Array<string | { fieldName?: string; name?: string }>;
+    }> = Array.isArray(properties?.indexes) ? properties.indexes : [];
+    const indexesXml = indexSpecs.length === 0
+      ? '\t<Indexes />\n'
+      : '\t<Indexes>\n' + indexSpecs.map((ix) => {
+          const refs = (ix.fields ?? []).map(fieldRefName).filter(Boolean);
+          return `\t\t<AxTableIndex>\n\t\t\t<Name>${ix.name}</Name>\n`
+            + (ix.allowDuplicates === false ? `\t\t\t<AllowDuplicates>No</AllowDuplicates>\n` : '')
+            + (ix.alternateKey ? `\t\t\t<AlternateKey>Yes</AlternateKey>\n` : '')
+            + (refs.length === 0
+              ? '\t\t\t<Fields />\n'
+              : '\t\t\t<Fields>\n'
+                + refs.map(r => `\t\t\t\t<AxTableIndexField>\n\t\t\t\t\t<DataField>${r}</DataField>\n\t\t\t\t</AxTableIndexField>\n`).join('')
+                + '\t\t\t</Fields>\n')
+            + `\t\t</AxTableIndex>\n`;
+        }).join('') + '\t</Indexes>\n';
+
+    // Tables have no HelpText property — the long-form description is
+    // DeveloperDocumentation. Accept `helpText` as the friendly alias callers reach for.
+    const devDoc = properties?.developerDocumentation ?? properties?.helpText;
+    const devDocXml = devDoc ? `\t<DeveloperDocumentation>${devDoc}</DeveloperDocumentation>\n` : '';
 
     return `<?xml version="1.0" encoding="utf-8"?>
 <AxTable xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
@@ -709,7 +825,7 @@ public class ${tableName} extends common
 ]]></Declaration>
 \t\t<Methods />
 \t</SourceCode>
-${configKeyXml}\t<Label>${label}</Label>
+${configKeyXml}${devDocXml}\t<Label>${label}</Label>
 \t<TableGroup>${tableGroup}</TableGroup>
 ${tableTypeXml}\t<TitleField1>${titleField1}</TitleField1>
 \t<TitleField2>${titleField2}</TitleField2>
@@ -736,10 +852,9 @@ ${cacheLookupXml}${primaryIndexXml}\t<DeleteActions />
 \t\t\t<Name>AutoBrowse</Name>
 \t\t\t<Fields />
 \t\t</AxTableFieldGroup>
-\t</FieldGroups>
+${extraFieldGroupsXml}\t</FieldGroups>
 ${fieldsXml}\t<FullTextIndexes />
-\t<Indexes />
-\t<Mappings />
+${indexesXml}\t<Mappings />
 \t<Relations />
 \t<StateMachines />
 </AxTable>
@@ -843,7 +958,10 @@ ${enumValuesXml}${isExtensibleXml}</AxEnum>
       gridFields: Array.isArray(properties?.gridFields) ? properties.gridFields : undefined,
       linesDsName: properties?.linesDataSource,
       linesDsTable: properties?.linesDataSourceTable || properties?.linesDataSource,
+      linesFields: Array.isArray(properties?.linesFields) ? properties.linesFields : undefined,
       sections: Array.isArray(properties?.sections) ? properties.sections : undefined,
+      fieldTypes: buildFieldControlMap(properties?.fieldTypes),
+      linesFieldTypes: buildFieldControlMap(properties?.linesFieldTypes),
     });
   }
 
@@ -2329,16 +2447,25 @@ ${defaultParamGroupXml}
     const edtType = edtTypeNormMap[edtTypeRaw.toLowerCase()] ?? edtTypeRaw;
     const label = properties?.label || '@TODO:LabelId';
     const extends_ = properties?.extends ? `\n\t<Extends>${properties.extends}</Extends>` : '';
-    const stringSize = edtType === 'AxEdtString'
+    // HelpText is the field-level tooltip every AOT EDT carries next to Label;
+    // element order mirrors shipped EDTs (Extends → HelpText → Label).
+    const helpTextXml = properties?.helpText ? `\n\t<HelpText>${properties.helpText}</HelpText>` : '';
+    // StringSize is INHERITED from the base EDT — shipped extending EDTs (VendAccount,
+    // AddressCountryRegionId…) never restate it, and doing so is a metadata error.
+    // Use stringSize -1 for a memo (unbounded) EDT, matching the standard `Notes` EDT.
+    const stringSize = (edtType === 'AxEdtString' && !properties?.extends)
       ? `\n\t<StringSize>${properties?.stringSize ?? 30}</StringSize>` : '';
+    // An AxEdtEnum must name the base enum it wraps, unless it inherits one via Extends.
+    const enumTypeXml = (edtType === 'AxEdtEnum' && properties?.enumType && !properties?.extends)
+      ? `\n\t<EnumType>${properties.enumType}</EnumType>` : '';
     return `<?xml version="1.0" encoding="utf-8"?>
 <AxEdt xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns=""
 \ti:type="${edtType}">
-\t<Name>${name}</Name>
-\t<Label>${label}</Label>${extends_}
+\t<Name>${name}</Name>${extends_}${helpTextXml}
+\t<Label>${label}</Label>
 \t<ArrayElements />
 \t<Relations />
-\t<TableReferences />${stringSize}
+\t<TableReferences />${stringSize}${enumTypeXml}
 </AxEdt>`;
   }
 
@@ -2414,6 +2541,7 @@ ${enumValuesXml}
       edt?: string;
       enumType?: string;
       label?: string;
+      helpText?: string;
       mandatory?: boolean;
       fieldType?: string;
     }> = Array.isArray(properties?.fields) ? properties.fields : [];
@@ -2428,6 +2556,7 @@ ${enumValuesXml}
         fieldsXml += `\t\t<AxTableField xmlns=""\n\t\t\ti:type="${iType}">\n`;
         fieldsXml += `\t\t\t<Name>${f.name}</Name>\n`;
         if (f.edt)       fieldsXml += `\t\t\t<ExtendedDataType>${f.edt}</ExtendedDataType>\n`;
+        if (f.helpText)  fieldsXml += `\t\t\t<HelpText>${f.helpText}</HelpText>\n`;
         if (f.label)     fieldsXml += `\t\t\t<Label>${f.label}</Label>\n`;
         if (f.mandatory) fieldsXml += `\t\t\t<Mandatory>Yes</Mandatory>\n`;
         if (f.enumType)  fieldsXml += `\t\t\t<EnumType>${f.enumType}</EnumType>\n`;
@@ -3978,7 +4107,19 @@ export async function handleCreateD365File(
     const skipBridgeForExtensibleEnum = args.objectType === 'enum'
       && Boolean((args.properties as Record<string, unknown> | undefined)?.isExtensible);
 
-    if (!args.xmlContent && !skipBridgeForExtensibleEnum && context?.bridge && actualModelName && canBridgeCreate(args.objectType)) {
+    // EXCEPTION — enum EDTs that name their base enum directly: the bridge's
+    // SetAxEdtProperty has no `enumType` case, so it logs "Unknown AxEdt property"
+    // and creates an AxEdtEnum with NO EnumType — an EDT with no underlying type,
+    // which xppc rejects. (An enum EDT that inherits its EnumType via `extends` is
+    // fine, so only the explicit-enumType case detours.) The TypeScript generator
+    // emits <EnumType>, so use it instead.
+    const edtProps = args.objectType === 'edt'
+      ? (args.properties as Record<string, unknown> | undefined)
+      : undefined;
+    const skipBridgeForEnumEdt = Boolean(edtProps?.enumType) && !edtProps?.extends;
+
+    if (!args.xmlContent && !skipBridgeForExtensibleEnum && !skipBridgeForEnumEdt
+        && context?.bridge && actualModelName && canBridgeCreate(args.objectType)) {
       try {
         // The bridge's `properties` is a flat string map (C# Dictionary<string,string>).
         // Keep only SCALAR values and stringify them. Structured collections
@@ -4003,6 +4144,25 @@ export async function handleCreateD365File(
           properties: scalarProperties && Object.keys(scalarProperties).length > 0 ? scalarProperties : undefined,
         };
 
+        // For EDTs: the C# CreateEdt picks the concrete AxEdt* subclass from a
+        // property literally named "BaseType" (exact case — it is a plain
+        // Dictionary<string,string> lookup). Our documented input spelling is
+        // `edtType`, which the bridge does not recognise: it fell through to the
+        // default branch and silently produced an AxEdtString for EVERY EDT,
+        // whatever type was asked for. Translate it here.
+        if (args.objectType === 'edt' && scalarProperties) {
+          const rawEdtType = scalarProperties.edtType ?? scalarProperties.baseType;
+          if (rawEdtType) {
+            // Accept the AxEdt* form too — the C# switch matches base-type keywords.
+            bridgeParams.properties = {
+              ...scalarProperties,
+              BaseType: rawEdtType.replace(/^AxEdt/, '').toLowerCase(),
+            };
+            delete bridgeParams.properties.edtType;
+            delete bridgeParams.properties.baseType;
+          }
+        }
+
         // For classes: parse sourceCode into declaration + methods
         if ((args.objectType === 'class' || args.objectType === 'class-extension') && args.sourceCode) {
           const parsed = XmlTemplateGenerator.parseSourceForBridge(args.sourceCode);
@@ -4018,8 +4178,8 @@ export async function handleCreateD365File(
         if ((args.objectType === 'table' || args.objectType === 'table-extension') && args.properties) {
           const props = args.properties as Record<string, unknown>;
           if (props.fields) bridgeParams.fields = normalizeFieldSpecsForBridge(props.fields as Record<string, unknown>[]);
-          if (props.fieldGroups) bridgeParams.fieldGroups = props.fieldGroups as Record<string, unknown>[];
-          if (props.indexes) bridgeParams.indexes = props.indexes as Record<string, unknown>[];
+          if (props.fieldGroups) bridgeParams.fieldGroups = normalizeFieldGroupSpecsForBridge(props.fieldGroups as Record<string, unknown>[]);
+          if (props.indexes) bridgeParams.indexes = normalizeIndexSpecsForBridge(props.indexes as Record<string, unknown>[]);
           if (props.relations) bridgeParams.relations = props.relations as Record<string, unknown>[];
           if (props.methods) {
             bridgeParams.methods = (props.methods as { name: string; source?: string }[]).map(m => ({
@@ -4162,10 +4322,21 @@ export async function handleCreateD365File(
       const classStrPattern = new RegExp(`\\bclassStr\\(\\s*${escapedOrig}\\s*\\)`, 'gi');
       replaced = replaced.replace(classStrPattern, (m) => m.replace(new RegExp(escapedOrig, 'i'), final));
 
+      // 4. Root <Name> element — the object's own identity in the AOT XML.
+      //    xppc rejects the object outright when this disagrees with the file name
+      //    ("The element must be named 'X' instead of 'Y' to be consistent with its
+      //    file name"), which is what happens when xmlContent comes from a caller
+      //    that did not apply the prefix (e.g. d365fo_file(action="generate") on a
+      //    read-only/cloud instance). Only the FIRST <Name> is the root identity —
+      //    later ones are fields/indexes/methods and must not be touched, so this
+      //    regex is deliberately non-global.
+      const rootNamePattern = new RegExp(`<Name>${escapedOrig}</Name>`);
+      replaced = replaced.replace(rootNamePattern, `<Name>${final}</Name>`);
+
       if (replaced !== xmlContent) {
         console.error(
-          `[create_d365fo_file] ✅ Fixed class name inconsistency: ` +
-          `replaced \`${orig}\` with \`${final}\` in XML content (class decl, classnum, classStr)`,
+          `[create_d365fo_file] ✅ Fixed name inconsistency: ` +
+          `replaced \`${orig}\` with \`${final}\` in XML content (class decl, classnum, classStr, root <Name>)`,
         );
         xmlContent = replaced;
       }

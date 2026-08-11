@@ -9,8 +9,8 @@
  *
  * Relevant env vars:
  *   DB_PATH          Path to the SQLite database  (default: ./data/xpp-metadata.db)
- *   PACKAGES_PATH    Path to PackagesLocalDirectory for label indexing
- *                    (default: K:\AosService\PackagesLocalDirectory)
+ *   D365FO_PACKAGE_PATH  Path to PackagesLocalDirectory for label indexing (primary; falls back to
+ *                        legacy PACKAGES_PATH, then default: C:\AOSService\PackagesLocalDirectory)
  *   INCLUDE_LABELS   Set to 'false' to skip label indexing  (default: true)
  *   EXTRACT_MODE     'all' | 'standard' | 'custom' — controls which model labels to index
  *                    (default: 'all')
@@ -36,7 +36,7 @@ const __dirname = path.dirname(__filename);
 
 const OUTPUT_DB     = process.env.DB_PATH       || './data/xpp-metadata.db';
 const OUTPUT_LABELS_DB = process.env.LABELS_DB_PATH || './data/xpp-metadata-labels.db';
-const PACKAGES_PATH = process.env.PACKAGES_PATH || 'K:\\AosService\\PackagesLocalDirectory';
+const PACKAGES_PATH = process.env.D365FO_PACKAGE_PATH || process.env.PACKAGES_PATH || 'C:\\AOSService\\PackagesLocalDirectory';
 const INCLUDE_LABELS = process.env.INCLUDE_LABELS !== 'false'; // default: true
 const EXTRACT_MODE  = process.env.EXTRACT_MODE  || 'all';
 
