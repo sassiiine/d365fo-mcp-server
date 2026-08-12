@@ -6,6 +6,7 @@
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { XppServerContext } from '../../types/context.js';
+import { searchBackend } from '../../metadata/searchBackend.js';
 import { validateWorkspacePath } from '../../workspace/workspaceUtils.js';
 import { tryBridgeCompletion } from '../../bridge/index.js';
 import { inheritanceAncestors } from '../../utils/inheritanceChain.js';
@@ -38,7 +39,7 @@ export async function completionTool(request: CallToolRequest, context: XppServe
 
     // code_completion only supports classes; reject tables early.
     // Exact-name lookup, not FTS search, to avoid prefix-match false positives.
-    const tableCheck = symbolIndex.getSymbolByName(args.className, 'table');
+    const tableCheck = await searchBackend(context).getSymbolByName(args.className, 'table');
     if (tableCheck) {
       return {
         content: [
@@ -87,8 +88,9 @@ export async function completionTool(request: CallToolRequest, context: XppServe
     const completions = symbolIndex.getCompletions(args.className, args.prefix);
 
     if (completions.length === 0) {
-      const classExists = symbolIndex.getSymbolByName(args.className, 'class') !== null;
-      const tableExists = symbolIndex.getSymbolByName(args.className, 'table') !== null;
+      const backend = searchBackend(context);
+      const classExists = (await backend.getSymbolByName(args.className, 'class')) !== null;
+      const tableExists = (await backend.getSymbolByName(args.className, 'table')) !== null;
 
       if (tableExists) {
         return {

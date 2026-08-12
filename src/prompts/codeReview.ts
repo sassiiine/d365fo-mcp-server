@@ -7,6 +7,7 @@ import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { GetPromptRequestSchema, ListPromptsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { XppServerContext } from '../types/context.js';
+import { searchBackend } from '../metadata/searchBackend.js';
 import { getSystemInstructionsPromptDefinition, handleSystemInstructionsPrompt } from './systemInstructions.js';
 
 const CodeReviewArgsSchema = z.object({
@@ -18,7 +19,7 @@ const ExplainClassArgsSchema = z.object({
 });
 
 export function registerCodeReviewPrompt(server: Server, context: XppServerContext): void {
-  const { symbolIndex, parser } = context;
+  const { parser } = context;
 
   server.setRequestHandler(ListPromptsRequestSchema, async () => {
     return {
@@ -181,7 +182,7 @@ ${args.code}
 
     if (promptName === 'xpp_explain_class') {
       const args = ExplainClassArgsSchema.parse(request.params.arguments || {});
-      const classSymbol = symbolIndex.getSymbolByName(args.className, 'class');
+      const classSymbol = await searchBackend(context).getSymbolByName(args.className, 'class');
       
       let classSource = 'Class not found in index';
 
