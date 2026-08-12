@@ -22,6 +22,7 @@ import {
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import type { XppServerContext } from '../types/context.js';
+import { searchBackend } from '../metadata/searchBackend.js';
 import { isClassUri, readClassSource, CLASS_URI_PREFIX } from './classResource.js';
 import { buildContextSnapshot } from '../workspace/contextSnapshot.js';
 
@@ -118,7 +119,7 @@ export function registerResources(server: Server, context: XppServerContext): vo
           let indexed: { name: string; type: string; model: string; signature?: string } | null = null;
           if (active && active.type !== 'unknown') {
             try {
-              const sym = context.symbolIndex.getSymbolByName(active.name, active.type);
+              const sym = await searchBackend(context).getSymbolByName(active.name, active.type);
               if (sym) {
                 indexed = {
                   name: sym.name,

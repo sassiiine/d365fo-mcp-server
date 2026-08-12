@@ -6,6 +6,7 @@
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { XppServerContext } from '../../types/context.js';
+import { searchBackend } from '../../metadata/searchBackend.js';
 import { validateWorkspacePath } from '../../workspace/workspaceUtils.js';
 import { buildObjectTypeMismatchMessage } from '../../utils/metadataResolver.js';
 import { tryBridgeClass } from '../../bridge/bridgeAdapter.js';
@@ -56,7 +57,7 @@ export async function classInfoTool(request: CallToolRequest, context: XppServer
     }
 
     // Query database next
-    const classSymbol = symbolIndex.getSymbolByName(args.className, 'class');
+    const classSymbol = await searchBackend(context).getSymbolByName(args.className, 'class');
 
     if (!classSymbol) {
       const typeMismatch = buildObjectTypeMismatchMessage(symbolIndex.getReadDb(), args.className);

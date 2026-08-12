@@ -15,6 +15,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createXppMcpServer } from './server/mcpServer.js';
 import { createStreamableHttpTransport } from './server/transport.js';
 import { XppSymbolIndex } from './metadata/symbolIndex.js';
+import { makeSearchBackend } from './metadata/searchBackend.js';
 import { XppMetadataParser } from './metadata/xmlParser.js';
 import { WorkspaceScanner } from './workspace/workspaceScanner.js';
 import { HybridSearch } from './workspace/hybridSearch.js';
@@ -626,6 +627,10 @@ async function main() {
       hybridSearch: stubHybrid,
       dbReady: dbReadyPromise,
     };
+    // Search backend (Architecture-A seam): Neon when configured, else a thin
+    // async adapter over the local index. The adapter reads symbolIndex through
+    // a getter so it follows the stub → real swap in initializeServices() below.
+    stubContext.searchIndex = makeSearchBackend(() => stubContext.symbolIndex);
     const mcpServer = createXppMcpServer(stubContext);
 
     // Step 2: connect transport — handshake completes here

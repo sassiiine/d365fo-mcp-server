@@ -6,6 +6,7 @@
  */
 
 import type { XppServerContext } from '../types/context.js';
+import { searchBackend } from '../metadata/searchBackend.js';
 
 export const CLASS_URI_PREFIX = 'xpp://class/';
 
@@ -23,9 +24,9 @@ export async function readClassSource(
   context: XppServerContext,
   uri: string
 ): Promise<string> {
-  const { symbolIndex, parser } = context;
+  const { parser } = context;
   const className = uri.slice(CLASS_URI_PREFIX.length);
-  const classSymbol = symbolIndex.getSymbolByName(className, 'class');
+  const classSymbol = await searchBackend(context).getSymbolByName(className, 'class');
 
   if (!classSymbol) {
     throw new Error(`Class "${className}" not found`);
