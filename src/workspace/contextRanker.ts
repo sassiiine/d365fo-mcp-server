@@ -13,6 +13,7 @@
 
 import type { XppServerContext } from '../types/context.js';
 import type { XppSymbol } from '../metadata/types.js';
+import { searchBackend } from '../metadata/searchBackend.js';
 import { isCustomModel } from '../utils/modelClassifier.js';
 
 export interface RankContextInput {
@@ -95,10 +96,10 @@ function csvSet(value: string | undefined): Set<string> {
  * Rank relevant symbols for an intent + optional active object.
  * Returns a token-budgeted, explainable neighborhood. Never throws.
  */
-export function rankContext(
+export async function rankContext(
   context: XppServerContext,
   input: RankContextInput
-): RankedContext {
+): Promise<RankedContext> {
   const limit = input.limit ?? DEFAULT_LIMIT;
   const tokenBudget = input.tokenBudget ?? DEFAULT_TOKEN_BUDGET;
   const tokens = tokenizeIntent(input.intent);
@@ -118,12 +119,13 @@ export function rankContext(
     });
   };
 
+  const backend = searchBackend(context);
   try {
     if (tokens.length > 0) {
-      addList(context.symbolIndex.searchSymbols(tokens.join(' '), CANDIDATE_POOL, input.types));
+      addList(await backend.searchSymbols(tokens.join(' '), CANDIDATE_POOL, input.types));
     }
     if (input.activeObject?.name) {
-      addList(context.symbolIndex.searchSymbols(input.activeObject.name, 20, input.types));
+      addList(await backend.searchSymbols(input.activeObject.name, 20, input.types));
     }
   } catch {
     // Index unavailable — return an empty, well-formed result.
@@ -142,7 +144,7 @@ export function rankContext(
   if (input.activeObject?.name) {
     try {
       const anchor =
-        context.symbolIndex.getSymbolByName(input.activeObject.name, input.activeObject.type ?? 'class') ??
+        (await backend.getSymbolByName(input.activeObject.name, input.activeObject.type ?? 'class')) ??
         pool.get(keyOf({ name: input.activeObject.name, type: input.activeObject.type ?? 'class' }));
       if (anchor) {
         anchorRelated = csvSet(anchor.relatedMethods);

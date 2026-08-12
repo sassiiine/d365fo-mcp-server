@@ -352,6 +352,11 @@ async function performExternalSearch(
 ) {
   try {
     const types = args.type === 'all' ? undefined : [args.type];
+    // NOT yet routed through the ISearchIndex seam (metadata/searchBackend.ts):
+    // this pipeline layers local-only enrichment on the raw hits
+    // (probeExactMatches/probeCustomMatches/getAllSymbolNames/getSymbolsByTerm/
+    // markStaleRows), which needs a real Neon-side reimplementation + live
+    // validation, not a mechanical await. Tracked as the follow-up port.
     const raw: any[] = symbolIndex.searchSymbols(args.query, args.limit, types) || [];
 
     // #15: FTS5 `ORDER BY rank` scores token frequency, not name equality, so an
