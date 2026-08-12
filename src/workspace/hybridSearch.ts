@@ -35,7 +35,10 @@ export class HybridSearch {
   ): Promise<HybridSearchResult[]> {
     const results: HybridSearchResult[] = [];
 
-    // External metadata (D365FO PackagesLocalDirectory)
+    // External metadata (D365FO PackagesLocalDirectory).
+    // NOT yet routed through the ISearchIndex seam (metadata/searchBackend.ts):
+    // HybridSearch also calls analyzeCodePatterns (local-only), so it moves to
+    // the cloud backend together with that enrichment in the follow-up port.
     const externalSymbols = this.symbolIndex.searchSymbols(
       query,
       options.limit || 20,

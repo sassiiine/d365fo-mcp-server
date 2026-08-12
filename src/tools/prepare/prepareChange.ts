@@ -392,7 +392,7 @@ export async function prepareChangeTool(request: any, context: XppServerContext)
 
   // Ranked neighborhood, anchored on the target object; additive, best-effort.
   try {
-    const ranked = rankContext(context, {
+    const ranked = await rankContext(context, {
       intent: `${goal} ${objectName} ${methodName ?? ''}`,
       activeObject: { name: objectName, type: resolvedType },
     });

@@ -41,13 +41,13 @@ describe('tokenizeIntent', () => {
 });
 
 describe('rankContext', () => {
-  it('ranks keyword + relationship matches and drops the anchor itself', () => {
+  it('ranks keyword + relationship matches and drops the anchor itself', async () => {
     const symbols = [
       sym({ name: 'CustTable', type: 'table' }), // the anchor — should be dropped
       sym({ name: 'validateWrite', type: 'method', parentName: 'CustTable', signature: 'boolean validateWrite()' }),
       sym({ name: 'SomeUnrelated', type: 'class', model: 'ApplicationSuite' }),
     ];
-    const ranked = rankContext(ctxWith(symbols), {
+    const ranked = await rankContext(ctxWith(symbols), {
       intent: 'validateWrite on CustTable',
       activeObject: { name: 'CustTable', type: 'table' },
     });
@@ -60,11 +60,11 @@ describe('rankContext', () => {
     expect(ranked.items[0].reasons.join(' ')).toContain('member of CustTable');
   });
 
-  it('respects the token budget and flags truncation', () => {
+  it('respects the token budget and flags truncation', async () => {
     const many = Array.from({ length: 30 }, (_, i) =>
       sym({ name: `Helper${i}`, type: 'class', signature: 'public void doSomethingWithALongSignature()' })
     );
-    const ranked = rankContext(ctxWith(many), {
+    const ranked = await rankContext(ctxWith(many), {
       intent: 'helper',
       tokenBudget: 40,
       limit: 50,
@@ -74,7 +74,7 @@ describe('rankContext', () => {
     expect(ranked.items.length).toBeLessThan(many.length);
   });
 
-  it('returns a well-formed empty result when the index throws', () => {
+  it('returns a well-formed empty result when the index throws', async () => {
     const ctx = {
       symbolIndex: {
         searchSymbols: () => {
@@ -83,7 +83,7 @@ describe('rankContext', () => {
         getSymbolByName: () => null,
       },
     } as any;
-    const ranked = rankContext(ctx, { intent: 'anything' });
+    const ranked = await rankContext(ctx, { intent: 'anything' });
     expect(ranked.items).toEqual([]);
     expect(ranked.truncated).toBe(false);
     expect(renderRankedContext(ranked)[1]).toContain('no related objects');

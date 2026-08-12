@@ -20,6 +20,7 @@ import { getConfigManager } from '../../utils/configManager.js';
 import { normalizeObjectName } from '../../utils/objectNaming.js';
 import { renderPrepareOpSpec } from '../specs/opSpecs.js';
 import { rankContext, renderRankedContext } from '../../workspace/contextRanker.js';
+import { searchBackend } from '../../metadata/searchBackend.js';
 import { lookupSymbolsNocase, type SymbolHit } from '../../utils/symbolLookup.js';
 import { formatLabelReference } from '../../utils/labelReference.js';
 import { RESERVED_SYSTEM_FIELD_NAMES } from '../smart/generateSmartTable.js';
@@ -193,10 +194,10 @@ function suggestEdtsForFields(
 }
 
 /** Existing labels that could be reused for the new object. */
-function findReusableLabels(baseName: string, context: XppServerContext): string {
+async function findReusableLabels(baseName: string, context: XppServerContext): Promise<string> {
   try {
     const words = baseName.replace(/([A-Z])/g, ' $1').trim();
-    const rows = context.symbolIndex.searchLabels(words, { language: 'en-US', limit: 5 });
+    const rows = await searchBackend(context).searchLabels(words, { language: 'en-US', limit: 5 });
     if (rows.length > 0) {
       return rows
         // Not `@${labelFileId}:${labelId}` (#888): a legacy row's id already
@@ -263,15 +264,17 @@ export async function prepareCreateTool(request: any, context: XppServerContext)
   // a name that never gets written, so a real collision read as "No collision".
   const finalName = normalizeObjectName(objectName, objectType, modelName);
 
-  // All lookups are synchronous index queries — run them in one tick.
-  const [collisions, naming, similar, edts, labels, propertyDefaults] = [
+  // Index lookups, run in one tick. Most are synchronous; findReusableLabels
+  // goes through the async search backend (Neon or local adapter), so the batch
+  // resolves through Promise.all — the sync helpers settle immediately.
+  const [collisions, naming, similar, edts, labels, propertyDefaults] = await Promise.all([
     checkCollisions(finalName, objectName, context),
     validateNaming(objectName, finalName, modelName),
     findSimilarObjects(objectName, objectType, context),
     fieldsHint && fieldsHint.length > 0 ? suggestEdtsForFields(fieldsHint, context) : '',
     findReusableLabels(objectName, context),
     minedPropertyDefaults(objectType, context),
-  ];
+  ]);
 
   const token = createProvenanceToken({
     goal,
@@ -305,7 +308,7 @@ export async function prepareCreateTool(request: any, context: XppServerContext)
 
   // Surface existing code relevant to the goal; best-effort, omit on failure
   try {
-    const ranked = rankContext(context, {
+    const ranked = await rankContext(context, {
       intent: `${goal} ${objectName} ${(fieldsHint ?? []).join(' ')}`,
       activeObject: { name: objectName, type: objectType },
     });
