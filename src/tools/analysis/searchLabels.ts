@@ -12,6 +12,7 @@
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { XppServerContext } from '../../types/context.js';
+import { searchBackend } from '../../metadata/searchBackend.js';
 import { getConfigManager } from '../../utils/configManager.js';
 import {
   crossModelLabelWarning,
@@ -122,7 +123,6 @@ function resolveCurrentModel(explicit?: string): string | undefined {
 export async function searchLabelsTool(request: CallToolRequest, context: XppServerContext) {
   try {
     const args = SearchLabelsArgsSchema.parse(request.params.arguments);
-    const { symbolIndex } = context;
     const { query, language, model, labelFileId, verbose } = args;
 
     const requested = args.maxResults ?? args.limit;
@@ -130,7 +130,7 @@ export async function searchLabelsTool(request: CallToolRequest, context: XppSer
     // Over-fetch so the truncation footer can quantify what it hid.
     const probeLimit = Math.max(maxResults + 1, OVERFETCH_CAP);
 
-    const results = symbolIndex.searchLabels(query, { language, model, labelFileId, limit: probeLimit });
+    const results = await searchBackend(context).searchLabels(query, { language, model, labelFileId, limit: probeLimit });
 
     if (results.length === 0) {
       // Named before the advice: a caller that has already tried five wordings

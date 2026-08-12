@@ -6,6 +6,7 @@
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { XppServerContext } from '../../types/context.js';
+import { searchBackend } from '../../metadata/searchBackend.js';
 
 const AnalyzeClassCompletenessArgsSchema = z.object({
   className: z.string().describe('Name of the class to analyze'),
@@ -16,7 +17,7 @@ export async function analyzeClassCompletenessTool(request: CallToolRequest, con
     const args = AnalyzeClassCompletenessArgsSchema.parse(request.params.arguments);
     const { symbolIndex } = context;
 
-    const classSymbol = symbolIndex.getSymbolByName(args.className, 'class');
+    const classSymbol = await searchBackend(context).getSymbolByName(args.className, 'class');
     
     if (!classSymbol) {
       return {

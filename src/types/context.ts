@@ -3,6 +3,7 @@
  */
 
 import type { XppSymbolIndex } from '../metadata/symbolIndex.js';
+import type { ISearchIndex } from '../metadata/searchBackend.js';
 import type { XppMetadataParser } from '../metadata/xmlParser.js';
 import type { WorkspaceScanner } from '../workspace/workspaceScanner.js';
 import type { HybridSearch } from '../workspace/hybridSearch.js';
@@ -32,6 +33,14 @@ export interface EditorContext {
 
 export interface XppServerContext {
   symbolIndex: XppSymbolIndex;
+  /**
+   * Async search backend for the metadata index (Architecture-A cutover seam).
+   * Neon-backed when configured, otherwise a thin async adapter over
+   * `symbolIndex`. Set once at server start via makeSearchBackend(); tool code
+   * should read it through `searchBackend(context)`, which falls back to a local
+   * adapter when this is absent (e.g. in tests). See metadata/searchBackend.ts.
+   */
+  searchIndex?: ISearchIndex;
   parser: XppMetadataParser;
   workspaceScanner: WorkspaceScanner;
   hybridSearch: HybridSearch;
