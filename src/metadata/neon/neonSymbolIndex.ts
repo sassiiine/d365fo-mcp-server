@@ -44,6 +44,18 @@ const STOP_WORDS = new Set([
 const ESSENTIAL_COLS =
   'id, name, type, parent_name, signature, file_path, model, description';
 
+/** Full detail columns for a single-symbol fetch — EVERYTHING rowToSymbol maps
+ *  EXCEPT the two large free-text blobs `source` and `source_snippet`. A `SELECT *`
+ *  here dragged the entire X++ source of the matched object across the network on
+ *  every getSymbolByName (measured ~2 s on a real object vs ~150 ms for the light
+ *  searches); callers use file_path to read source from disk, so the blobs are
+ *  dead weight on the wire. */
+const DETAIL_COLS =
+  'id, name, type, parent_name, signature, file_path, model, package_name, ' +
+  'description, tags, complexity, used_types, method_calls, inline_comments, ' +
+  'extends_class, implements_interfaces, usage_example, usage_frequency, ' +
+  'pattern_type, typical_usages, called_by_count, related_methods, api_patterns';
+
 export interface LabelHit {
   labelId: string;
   labelFileId: string;
@@ -170,7 +182,7 @@ export class NeonSymbolIndex {
   /** Exact (name,type) lookup. Mirrors XppSymbolIndex.getSymbolByName. */
   async getSymbolByName(name: string, type: string): Promise<XppSymbol | null> {
     const { rows } = await this.pool.query(
-      `SELECT * FROM ${this.schema}.symbols WHERE name = $1 AND type = $2 LIMIT 1`,
+      `SELECT ${DETAIL_COLS} FROM ${this.schema}.symbols WHERE name = $1 AND type = $2 LIMIT 1`,
       [name, type],
     );
     return rows.length ? this.rowToSymbol(rows[0]) : null;
