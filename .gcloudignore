@@ -1,0 +1,56 @@
+# What `gcloud builds submit` / `gcloud run deploy --source .` uploads.
+#
+# Without this file gcloud uploads the whole working tree. `data/` is 2.8 GB of
+# SQLite index; uploading it would cost minutes per deploy and land another copy
+# in gs://dynamics-mcp_cloudbuild/source/ every time.
+#
+# EVERY directory pattern here is anchored with a leading slash. This file uses
+# gitignore semantics, where a bare `metadata/` matches at ANY depth — which
+# silently excluded src/metadata/, src/bridge/ and src/eval/ from the upload and
+# broke the build with ~120 "Cannot find module" errors that looked like a
+# TypeScript problem. Anchor or it bites again.
+#
+# Keep in sync with .dockerignore — this controls the upload, that controls the
+# image layer. An entry missing here is a slow deploy; missing there is a fat
+# image.
+/data/
+/extracted-metadata/
+/metadata/
+/instances/
+/dist/
+/coverage/
+/tmp/
+
+# Windows-only C# bridge — not used by the read-only cloud image. Anchored, so
+# src/bridge/ (TypeScript, required to compile) is still uploaded.
+/bridge/
+
+# Root-level only: src/eval/ is part of the compile and must ship.
+/tests/
+/eval/
+/docs/
+
+/.git/
+/.github/
+/.azure-pipelines/
+/.claude/
+/.vscode/
+/.idea/
+
+# node_modules is intentionally unanchored — nested copies are just as unwanted.
+node_modules/
+
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+*.tsbuildinfo
+
+.env
+.env.*
+.mcp.json
+/config/d365fo-mcp.json
+/config/secrets.json
+deployment.zip

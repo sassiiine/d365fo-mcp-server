@@ -94,3 +94,4 @@ deployment.zip
 
 # Transient git worktrees created by Claude Code subagents
 .claude/worktrees/
+data/

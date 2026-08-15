@@ -1,0 +1,47 @@
+# Keep the build context small. `data/` alone is 2.8 GB of SQLite index that
+# the cloud image must never contain — the index lives in Neon.
+#
+# Directory patterns are anchored with a leading slash so they cannot match
+# nested paths. Docker's matching is root-relative already, but .gcloudignore
+# (gitignore semantics) is not, and these two files are meant to be read as a
+# pair — keeping one syntax avoids copying an unanchored pattern across and
+# silently dropping src/metadata/ or src/bridge/ from the compile.
+/data/
+/extracted-metadata/
+/metadata/
+/instances/
+/dist/
+/coverage/
+/tmp/
+
+# Windows-only C# bridge. Anchored: src/bridge/ (TypeScript) must still ship.
+/bridge/
+
+/.git/
+/.github/
+/.azure-pipelines/
+/.claude/
+/.vscode/
+/.idea/
+
+# Root-level only: src/eval/ is part of the compile.
+/tests/
+/eval/
+/docs/
+
+node_modules/
+
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+*.tsbuildinfo
+
+.env
+.env.*
+.mcp.json
+/config/d365fo-mcp.json
+/config/secrets.json
+deployment.zip
