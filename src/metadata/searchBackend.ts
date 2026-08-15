@@ -23,6 +23,8 @@ import type { XppSymbol } from './types.js';
 import type { XppSymbolIndex } from './symbolIndex.js';
 import { NeonSymbolIndex } from './neon/neonSymbolIndex.js';
 import { readNeonConfig } from './neon/neonConfig.js';
+import { lookupSymbolsNocase } from '../utils/symbolLookup.js';
+import { isExactNameMatch } from '../utils/exactMatchRanking.js';
 
 /** Unified label-search row. The SQLite path additionally carries `rank`
  *  (FTS5 bm25); Neon has no equivalent, so it is optional. Consumers normalise
@@ -56,6 +58,27 @@ export interface ISearchIndex {
   searchByPrefix(prefix: string, types?: string[], limit?: number): Promise<XppSymbol[]>;
   getSymbolByName(name: string, type: string): Promise<XppSymbol | null>;
   searchLabels(query: string, opts?: LabelSearchOpts): Promise<LabelRow[]>;
+  /**
+   * Case-insensitive EXACT name lookup, bounded. Powers the search tool's
+   * exact-first splice (probeExactMatches), which previously reached past this
+   * seam into raw SQLite via getReadDb() — a call that has no meaning when the
+   * index lives in Neon and a container has no local database file.
+   */
+  lookupExactNames(query: string, types?: string[], limit?: number): Promise<ExactHit[]>;
+  /**
+   * Keyword search restricted to CUSTOM/ISV models. Broad searches routed
+   * through the C# bridge fill their window with Microsoft objects and truncate,
+   * so custom hits are probed separately and spliced back in.
+   */
+  searchCustomModelSymbols(query: string, types?: string[], limit?: number): Promise<XppSymbol[]>;
+}
+
+/** Minimal row shape the exact-name probe needs. */
+export interface ExactHit {
+  name: string;
+  type: string;
+  model?: string;
+  filePath?: string;
 }
 
 /**
@@ -84,6 +107,41 @@ export class SqliteSearchAdapter implements ISearchIndex {
 
   async searchLabels(query: string, opts: LabelSearchOpts = {}): Promise<LabelRow[]> {
     return this.getIndex().searchLabels(query, opts);
+  }
+
+  /**
+   * Same guards as the original inline probe: a query containing whitespace or
+   * FTS metacharacters is not an exact name, and any failure yields [] because
+   * the exact-first repair must never break search.
+   */
+  async lookupExactNames(query: string, types?: string[], limit = 5): Promise<ExactHit[]> {
+    if (!query || /[\s*"%]/.test(query)) return [];
+    try {
+      const db = (this.getIndex() as unknown as { getReadDb?: () => unknown }).getReadDb?.();
+      if (!db) return [];
+      return lookupSymbolsNocase(db as never, query, { types, limit })
+        .filter(hit => isExactNameMatch(query, hit.name))
+        .map(hit => ({
+          name: hit.name,
+          type: hit.type,
+          model: hit.model ?? undefined,
+          filePath: hit.file_path ?? undefined,
+        }));
+    } catch {
+      return [];
+    }
+  }
+
+  async searchCustomModelSymbols(query: string, types?: string[], limit = 15): Promise<XppSymbol[]> {
+    if (!query) return [];
+    try {
+      const idx = this.getIndex() as unknown as {
+        searchCustomModelSymbols?: (q: string, t?: string[], l?: number) => XppSymbol[];
+      };
+      return idx.searchCustomModelSymbols?.(query, types, limit) ?? [];
+    } catch {
+      return [];
+    }
   }
 }
 

@@ -16,6 +16,7 @@ import { createXppMcpServer } from './server/mcpServer.js';
 import { createStreamableHttpTransport } from './server/transport.js';
 import { XppSymbolIndex } from './metadata/symbolIndex.js';
 import { makeSearchBackend } from './metadata/searchBackend.js';
+import { readNeonConfig } from './metadata/neon/neonConfig.js';
 import { XppMetadataParser } from './metadata/xmlParser.js';
 import { WorkspaceScanner } from './workspace/workspaceScanner.js';
 import { HybridSearch } from './workspace/hybridSearch.js';
@@ -281,12 +282,22 @@ async function initializeServices() {
     let symbolIndex: XppSymbolIndex;
     let dbHasSymbols = false;
 
+    // When the index lives in Neon, the local SQLite file is NOT the source of
+    // truth and must not be opened. In a container it does not exist at all, and
+    // opening DB_PATH there would either stall the loop on a multi-GB file or —
+    // worse — fall into the "no symbols" branch below and kick off a full
+    // metadata re-index on startup. An in-memory index keeps the read sites that
+    // are not yet ported to the search seam working against an empty local store.
+    const indexIsRemote = readNeonConfig() !== null;
+
     try {
-      symbolIndex = new XppSymbolIndex(DB_PATH, LABELS_DB_PATH);
+      symbolIndex = indexIsRemote
+        ? new XppSymbolIndex(':memory:', ':memory:')
+        : new XppSymbolIndex(DB_PATH, LABELS_DB_PATH);
       // Cheap O(1) probe — NOT getSymbolCount(): a full COUNT scan of a 2 GB DB
       // blocks the event loop for 30-60 s, which starves the MCP handshake and
       // makes clients (VS Code Copilot) time out and kill the server.
-      dbHasSymbols = symbolIndex.hasAnySymbols();
+      dbHasSymbols = indexIsRemote || symbolIndex.hasAnySymbols();
     } catch (error: any) {
       console.error(statusLine('err', 'Failed to open database:'), error);
 
@@ -317,7 +328,10 @@ async function initializeServices() {
     const parser = new XppMetadataParser();
 
     // Check if database needs indexing
-    if (!dbHasSymbols) {
+    if (indexIsRemote) {
+      log.ok('Symbol index: Neon Postgres — local SQLite not opened');
+      log.detail('reads go through the search seam; no startup indexing');
+    } else if (!dbHasSymbols) {
       log.warn('No symbols found in database — run `npm run index-metadata` first');
       log.detail('or set METADATA_PATH and the server will index on startup');
 
@@ -366,6 +380,11 @@ async function initializeServices() {
       parser,
       workspaceScanner,
       hybridSearch,
+      // The HTTP path used to omit this, so searchBackend() silently fell back
+      // to the local SQLite adapter and Neon was never consulted — invisible in
+      // stdio (where line ~640 sets it) but fatal for a cloud deployment, which
+      // only ever runs this branch. Construct it once here so the pool is shared.
+      searchIndex: makeSearchBackend(() => symbolIndex),
     };
     const mcpServer = createXppMcpServer(context);
 

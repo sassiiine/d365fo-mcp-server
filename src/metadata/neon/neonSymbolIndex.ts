@@ -30,6 +30,7 @@ import { Pool } from 'pg';
 
 import type { XppSymbol } from '../types.js';
 import type { NeonIndexConfig } from './neonConfig.js';
+import { isStandardModel } from '../../utils/modelClassifier.js';
 
 /** Query verbs / type keywords stripped before tokenising — verbatim from
  *  XppSymbolIndex.sanitizeFtsQuery so both backends tokenise identically. */
@@ -236,6 +237,109 @@ export class NeonSymbolIndex {
       labelId: r.label_id, labelFileId: r.label_file_id, model: r.model,
       language: r.language, text: r.text, comment: r.comment ?? null, filePath: r.file_path,
     }));
+  }
+
+  /**
+   * Case-insensitive EXACT name lookup, bounded — the Neon half of the search
+   * tool's exact-first splice. The SQLite path used `name = ?` on idx_name_type
+   * with an FTS fallback for differently-cased input; here a single
+   * case-insensitive equality covers both.
+   *
+   * `name ILIKE $1` with a LIKE-escaped literal (no wildcards) is deliberate:
+   * it is an equality test that pg_trgm's GIN index on search_light can assist,
+   * whereas `lower(name) = lower($1)` has no usable index and degrades to a
+   * sequential scan of 1.15M rows.
+   */
+  async lookupExactNames(
+    query: string,
+    types?: string[],
+    limit = 5,
+  ): Promise<Array<{ name: string; type: string; model?: string; filePath?: string }>> {
+    // Same guard as the SQLite probe: whitespace or FTS metacharacters mean this
+    // is not an exact name and the probe must not fire.
+    if (!query || /[\s*"%]/.test(query)) return [];
+    const escaped = query.replace(/[\\%_]/g, (m) => '\\' + m);
+    const params: unknown[] = [escaped];
+    let sql = `SELECT name, type, model, file_path FROM ${this.schema}.symbols
+                WHERE name ILIKE $1 AND parent_name IS NULL`;
+    if (types && types.length > 0) {
+      sql += ` AND type IN (${types.map((_, i) => `$${i + 2}`).join(',')})`;
+      params.push(...types);
+    }
+    sql += ` LIMIT $${params.length + 1}`;
+    params.push(limit);
+    try {
+      const { rows } = await this.pool.query(sql, params);
+      return rows.map((r) => ({
+        name: r.name as string,
+        type: r.type as string,
+        model: (r.model as string) || undefined,
+        filePath: (r.file_path as string) || undefined,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Keyword search restricted to CUSTOM models. Mirrors
+   * XppSymbolIndex.searchCustomModelSymbols: the token match drives the query
+   * and the model filter narrows it to the small custom set.
+   */
+  async searchCustomModelSymbols(query: string, types?: string[], limit = 15): Promise<XppSymbol[]> {
+    if (!query) return [];
+    try {
+      const customModels = await this.getCustomModels();
+      if (customModels.length === 0) return [];
+
+      const tokens = this.tokenize(query);
+      const params: unknown[] = [];
+      let where: string;
+      if (tokens.length === 0) {
+        params.push(`(^|[^a-z0-9])${query.trim().toLowerCase()}([^a-z0-9]|$)`);
+        where = `search_light ~ $1`;
+      } else {
+        where = tokens
+          .map((t) => {
+            params.push(NeonSymbolIndex.boundaryPrefix(t));
+            return `search_light ~ $${params.length}`;
+          })
+          .join(' AND ');
+      }
+
+      params.push(customModels);
+      let sql = `SELECT ${ESSENTIAL_COLS} FROM ${this.schema}.symbols
+                  WHERE ${where} AND model = ANY($${params.length})`;
+      if (types && types.length > 0) {
+        sql += ` AND type IN (${types.map((_, i) => `$${params.length + i + 1}`).join(',')})`;
+        params.push(...types);
+      }
+      sql += ` ORDER BY length(name), name LIMIT $${params.length + 1}`;
+      params.push(limit);
+
+      const { rows } = await this.pool.query(sql, params);
+      return rows.map((r) => this.rowToSymbol(r));
+    } catch {
+      // Must never break search — same contract as the SQLite probe.
+      return [];
+    }
+  }
+
+  /**
+   * Distinct non-standard models, cached for the process lifetime. The set only
+   * changes when the index is rebuilt, and this would otherwise run a DISTINCT
+   * over 1.15M rows on every custom probe.
+   */
+  private customModelsCache: string[] | null = null;
+  private async getCustomModels(): Promise<string[]> {
+    if (this.customModelsCache) return this.customModelsCache;
+    const { rows } = await this.pool.query(
+      `SELECT DISTINCT model FROM ${this.schema}.symbols ORDER BY model`,
+    );
+    this.customModelsCache = rows
+      .map((r) => r.model as string)
+      .filter((m) => m && !isStandardModel(m));
+    return this.customModelsCache;
   }
 
   async getSymbolCount(): Promise<number> {
