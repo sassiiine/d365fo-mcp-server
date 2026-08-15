@@ -595,6 +595,19 @@ export const SETTINGS: Setting[] = [
     default: 120000,
   },
   {
+    path: 'server.apiKeyCacheTtlMs',
+    env: 'API_KEY_CACHE_TTL_MS',
+    section: 'server',
+    tier: 'advanced',
+    type: 'int',
+    label: 'Customer API key cache TTL (ms)',
+    description:
+      'How long a per-customer key lookup is trusted before Neon is consulted again. This IS the revocation ' +
+      'delay: a revoked key keeps working for up to this long on an already-running instance. Lower it when ' +
+      'immediate cutoff matters more than latency; 0 disables caching and costs a query per request.',
+    default: 60000,
+  },
+  {
     path: 'server.toolTimeoutFastMs',
     env: 'MCP_TOOL_TIMEOUT_FAST_MS',
     section: 'server',

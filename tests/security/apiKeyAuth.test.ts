@@ -167,7 +167,7 @@ describe('apiKeyAuth — request enforcement', () => {
     const { apiKeyAuth } = await loadWithKey(KEY);
     const res = fakeRes();
     const next = vi.fn();
-    apiKeyAuth(fakeReq('/mcp'), res, next as unknown as NextFunction);
+    await apiKeyAuth(fakeReq('/mcp'), res, next as unknown as NextFunction);
 
     expect(next).not.toHaveBeenCalled();
     expect(res.statusCode).toBe(401);
@@ -177,7 +177,7 @@ describe('apiKeyAuth — request enforcement', () => {
     const { apiKeyAuth } = await loadWithKey(KEY);
     const res = fakeRes();
     const next = vi.fn();
-    apiKeyAuth(fakeReq('/mcp', { 'x-api-key': 'b'.repeat(32) }), res, next as unknown as NextFunction);
+    await apiKeyAuth(fakeReq('/mcp', { 'x-api-key': 'b'.repeat(32) }), res, next as unknown as NextFunction);
 
     expect(next).not.toHaveBeenCalled();
     expect(res.statusCode).toBe(401);
@@ -187,9 +187,13 @@ describe('apiKeyAuth — request enforcement', () => {
     const { apiKeyAuth } = await loadWithKey(KEY);
     const res = fakeRes();
     const next = vi.fn();
-    expect(() =>
+    // An async middleware returns a rejected promise rather than throwing, so
+    // the old expect(() => ...).not.toThrow() form would pass even if the
+    // length-mismatch guard were removed and timingSafeEqual blew up.
+    await expect(
       apiKeyAuth(fakeReq('/mcp', { 'x-api-key': 'short' }), res, next as unknown as NextFunction),
-    ).not.toThrow();
+    ).resolves.toBeUndefined();
+    expect(next).not.toHaveBeenCalled();
     expect(res.statusCode).toBe(401);
   });
 
@@ -198,7 +202,7 @@ describe('apiKeyAuth — request enforcement', () => {
 
     for (const headers of [{ 'x-api-key': KEY }, { authorization: `Bearer ${KEY}` }]) {
       const next = vi.fn();
-      apiKeyAuth(fakeReq('/mcp', headers), fakeRes(), next as unknown as NextFunction);
+      await apiKeyAuth(fakeReq('/mcp', headers), fakeRes(), next as unknown as NextFunction);
       expect(next, JSON.stringify(headers)).toHaveBeenCalledOnce();
     }
   });
@@ -208,7 +212,7 @@ describe('apiKeyAuth — request enforcement', () => {
 
     for (const path of ['/health', '/']) {
       const next = vi.fn();
-      apiKeyAuth(fakeReq(path), fakeRes(), next as unknown as NextFunction);
+      await apiKeyAuth(fakeReq(path), fakeRes(), next as unknown as NextFunction);
       expect(next, path).toHaveBeenCalledOnce();
     }
   });
@@ -216,7 +220,7 @@ describe('apiKeyAuth — request enforcement', () => {
   it('passes through when no key is configured (guarded by authStartupError)', async () => {
     const { apiKeyAuth } = await loadWithKey(undefined);
     const next = vi.fn();
-    apiKeyAuth(fakeReq('/mcp'), fakeRes(), next as unknown as NextFunction);
+    await apiKeyAuth(fakeReq('/mcp'), fakeRes(), next as unknown as NextFunction);
     expect(next).toHaveBeenCalledOnce();
   });
 });

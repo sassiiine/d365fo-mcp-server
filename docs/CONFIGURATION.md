@@ -110,6 +110,7 @@ Transport, timeouts and logging of the MCP server process.
 | `server.logFile` | advanced | `LOG_FILE` | — | Absolute path; the server appends everything it writes to stderr. The way to get logs out of an IDE that hides MCP subprocess output. |
 | `server.forceHttp` | advanced | `MCP_FORCE_HTTP` | `false` | The server picks stdio when its stdin is piped. Set this to keep HTTP anyway — e.g. when running under a process supervisor that pipes stdin. |
 | `server.toolTimeoutMs` | advanced | `MCP_TOOL_TIMEOUT_MS` | `120000` | Upper bound for a single tool call before the server returns a timeout error. |
+| `server.apiKeyCacheTtlMs` | advanced | `API_KEY_CACHE_TTL_MS` | `60000` | How long a per-customer key lookup is trusted before Neon is consulted again. This IS the revocation delay: a revoked key keeps working for up to this long on an already-running instance. Lower it when immediate cutoff matters more than latency; 0 disables caching and costs a query per request. |
 | `server.toolTimeoutFastMs` | advanced | `MCP_TOOL_TIMEOUT_FAST_MS` | `30000` | Timeout for lookups that should always be quick (minimum 5000). |
 | `server.toolTimeoutHeavyMs` | advanced | `MCP_TOOL_TIMEOUT_HEAVY_MS` | `600000` | Timeout for builds, DB sync and test runs (minimum 60000). Raise it on slow VMs. |
 | `server.readPoolSize` | advanced | `READ_POOL_SIZE` | `3` | Parallel read connections to the index (clamped 1–8). More helps concurrent searches on fast disks. |
@@ -206,6 +207,7 @@ Downloading a pre-built index from blob storage instead of building it locally.
     "logFile": "",
     "forceHttp": false,
     "toolTimeoutMs": 120000,
+    "apiKeyCacheTtlMs": 60000,
     "toolTimeoutFastMs": 30000,
     "toolTimeoutHeavyMs": 600000,
     "readPoolSize": 3,

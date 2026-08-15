@@ -76,7 +76,7 @@ describe('apiKeyAuth — configuration resolved per request, not at import time'
 
     const { res, captured } = fakeRes();
     let nexted = false;
-    apiKeyAuth(fakeReq('/mcp'), res, () => { nexted = true; });
+    await apiKeyAuth(fakeReq('/mcp'), res, () => { nexted = true; });
 
     expect(nexted).toBe(false);
     expect(captured.status).toBe(401);
@@ -92,7 +92,7 @@ describe('apiKeyAuth — configuration resolved per request, not at import time'
     ]) {
       const { res, captured } = fakeRes();
       let nexted = false;
-      apiKeyAuth(fakeReq('/mcp', headers), res, () => { nexted = true; });
+      await apiKeyAuth(fakeReq('/mcp', headers), res, () => { nexted = true; });
       expect(nexted).toBe(true);
       expect(captured.status).toBeUndefined();
     }
@@ -104,7 +104,7 @@ describe('apiKeyAuth — configuration resolved per request, not at import time'
 
     const { res, captured } = fakeRes();
     let nexted = false;
-    apiKeyAuth(fakeReq('/mcp', { 'x-api-key': 'short' }), res, () => { nexted = true; });
+    await apiKeyAuth(fakeReq('/mcp', { 'x-api-key': 'short' }), res, () => { nexted = true; });
 
     expect(nexted).toBe(false);
     expect(captured.status).toBe(401);
@@ -115,7 +115,7 @@ describe('apiKeyAuth — configuration resolved per request, not at import time'
 
     const { res, captured } = fakeRes();
     let nexted = false;
-    apiKeyAuth(fakeReq('/mcp'), res, () => { nexted = true; });
+    await apiKeyAuth(fakeReq('/mcp'), res, () => { nexted = true; });
 
     expect(nexted).toBe(true);
     expect(captured.status).toBeUndefined();
@@ -127,7 +127,7 @@ describe('apiKeyAuth — configuration resolved per request, not at import time'
 
     const { res, captured } = fakeRes();
     let nexted = false;
-    apiKeyAuth(fakeReq('/health'), res, () => { nexted = true; });
+    await apiKeyAuth(fakeReq('/health'), res, () => { nexted = true; });
 
     expect(nexted).toBe(true);
     expect(captured.status).toBeUndefined();

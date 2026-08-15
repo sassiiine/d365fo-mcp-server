@@ -1,5 +1,15 @@
 import type { Request, Response, NextFunction } from 'express';
-import { timingSafeEqual } from 'node:crypto';
+import { keyStoreConfigured, resolveApiKey, type KeyPrincipal } from '../auth/apiKeyStore.js';
+
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      /** Set by apiKeyAuth once a key resolves. Absent when auth is disabled. */
+      principal?: KeyPrincipal;
+    }
+  }
+}
 
 /**
  * API Key authentication middleware for HTTP mode.
@@ -36,16 +46,6 @@ function configuredApiKey(): string | undefined {
 /** Paths that never require authentication */
 const PUBLIC_PATHS = new Set(['/', '/health']);
 
-/**
- * Constant-time string comparison.
- * Returns false immediately only when lengths differ (which is already
- * observable via response time in any string comparison).
- */
-function safeCompare(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
-}
-
 function extractApiKey(req: Request): string | null {
   // 1. X-Api-Key header (preferred)
   const xApiKey = req.headers['x-api-key'];
@@ -68,7 +68,11 @@ function extractApiKey(req: Request): string | null {
  * operator stating that something upstream does it?
  */
 function authIsConfigured(env: NodeJS.ProcessEnv): boolean {
-  return !!env.API_KEY?.trim() || env.ALLOW_UNAUTHENTICATED === 'true';
+  // The per-customer key store counts. Without this, a deployment that issues
+  // customer keys but sets no root API_KEY would look unauthenticated to
+  // authStartupError() and refuse to bind a public interface - even though every
+  // request is in fact checked against the table.
+  return !!env.API_KEY?.trim() || env.ALLOW_UNAUTHENTICATED === 'true' || keyStoreConfigured();
 }
 
 /**
@@ -148,24 +152,28 @@ export function authStartupError(env: NodeJS.ProcessEnv = process.env): string |
  * Express middleware that enforces API key authentication.
  * Mount BEFORE any route handlers.
  */
-export function apiKeyAuth(req: Request, res: Response, next: NextFunction): void {
-  const apiKey = configuredApiKey();
+export async function apiKeyAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const rootKey = configuredApiKey();
+  const hasStore = keyStoreConfigured();
 
-  // No API_KEY configured → auth disabled, pass through
-  if (!apiKey) {
+  // Neither a root key nor a customer key table → auth disabled, pass through.
+  // Safe only because a keyless server never reaches the network; see the
+  // module comment on resolveBindHost/authStartupError.
+  if (!rootKey && !hasStore) {
     next();
     return;
   }
 
-  // Public endpoints are always accessible (Azure health probes, etc.)
+  // Public endpoints are always accessible (Cloud Run/Azure health probes).
   if (PUBLIC_PATHS.has(req.path)) {
     next();
     return;
   }
 
   const provided = extractApiKey(req);
+  const principal = provided ? await resolveApiKey(provided) : null;
 
-  if (!provided || !safeCompare(provided, apiKey)) {
+  if (!principal) {
     res.status(401).json({
       error: 'Unauthorized',
       message: 'Missing or invalid API key. Provide it via X-Api-Key header or Authorization: Bearer <key>.',
@@ -173,5 +181,8 @@ export function apiKeyAuth(req: Request, res: Response, next: NextFunction): voi
     return;
   }
 
+  // Downstream handlers and logs can attribute the request to a customer, which
+  // is what makes per-tenant metering and rate limiting possible later.
+  req.principal = principal;
   next();
 }

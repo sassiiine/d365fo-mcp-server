@@ -45,10 +45,34 @@ Then restart VS Code and confirm both appear in the MCP panel.
 
 ### Issuing the key
 
-One key per customer, so it can be revoked without affecting anyone else. Today
-there is a single shared key in Secret Manager (`d365fo-mcp-api-key`) — that is
-fine for testing and **not** shippable. Per-customer keys with revocation are
-the prerequisite for charging anyone.
+One key per customer, issued from the `tenancy.api_keys` table in Neon. Needs
+`NEON_DATABASE_URL` in the environment.
+
+```powershell
+npm run keys -- issue "Contoso" --label "prod VM"
+npm run keys -- list
+npm run keys -- revoke "Contoso"
+```
+
+The key is printed **once** at issue time and cannot be recovered — only its
+SHA-256 digest is stored, so a dump of the table does not let the reader call the
+service. A customer who loses their key gets a new one and the old is revoked.
+
+Revocation is an `UPDATE`, not a `DELETE`, so the row survives as a record of who
+had access and when it ended. It takes effect within `API_KEY_CACHE_TTL_MS`
+(default 60 s) on instances that are already warm — the store caches lookups so
+auth does not cost a database round trip per MCP call.
+
+The `API_KEY` environment variable still works as an **operator/root** key. It is
+checked without touching the database, deliberately, so a Neon outage cannot lock
+you out of the service you need in order to diagnose it. Customer keys fail closed
+in that situation: a database error is never treated as a pass.
+
+First-time setup of the table:
+
+```powershell
+npm run keys -- init
+```
 
 ## How the endpoint is reachable without Google credentials
 
@@ -68,9 +92,9 @@ takes the first route and fails; the console setting takes the second.
 Consequence: `gcloud run services get-iam-policy` shows **no invoker bindings**
 on a service that is fully public. Do not read that as "not exposed".
 
-With the check off, the app's `API_KEY` is the *only* thing between the internet
-and the index. A single shared key is not good enough to charge for — per
-customer keys with revocation are the prerequisite.
+With the check off, the app's key middleware is the *only* thing between the
+internet and the index. That is why keys are per customer and revocable rather
+than one shared secret — see "Issuing the key" above.
 
 ## Verifying an onboarding worked
 

@@ -95,3 +95,7 @@ deployment.zip
 # Transient git worktrees created by Claude Code subagents
 .claude/worktrees/
 data/
+
+# Per-machine record of the last xppc build per model, written by
+# build_d365fo_project. Local state, not source.
+.last-build.json

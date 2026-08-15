@@ -51,12 +51,15 @@ Write-Output "==> deploying $Service to $Region"
 #                       bills CU-hours around the clock for an idle server.
 #   --max-instances=3   Neon sees maxPoolSize (NEON_POOL_MAX, default 5) x
 #                       instances. 3 caps it at 15 connections.
-#   --allow-unauthenticated
-#                       The listener is public because MCP clients (VS Code,
-#                       Copilot) send a static X-Api-Key header and cannot sign
-#                       Google IAM tokens. Authentication is the app's API_KEY
-#                       middleware, which src/index.ts refuses to start without
-#                       when binding a non-loopback address (authStartupError).
+#
+# --allow-unauthenticated is deliberately NOT passed. It grants allUsers the
+# run.invoker role, which the org policy constraints/iam.allowedPolicyMemberDomains
+# refuses - the deploy then prints a "Setting IAM policy failed" warning that
+# looks like the service is closed when it is not. Public access here comes from
+# run.googleapis.com/invoker-iam-disabled=true (console: Security >
+# Authentication > Allow public access), which is a service annotation rather
+# than an IAM binding and survives redeploys. Authentication is the app's own
+# API key middleware.
 #
 # Built as an array because PowerShell cannot parse a comment inside a
 # backtick-continued command.
@@ -73,8 +76,7 @@ $deployArgs = @(
   '--concurrency=40',
   '--timeout=300',
   '--min-instances=0',
-  '--max-instances=3',
-  '--allow-unauthenticated'
+  '--max-instances=3'
 )
 & $gcloud @deployArgs
 if ($LASTEXITCODE -ne 0) { throw "deploy failed" }
