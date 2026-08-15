@@ -140,9 +140,28 @@ export function buildAxTableXml(
   // Field-spec keys are unified with the table-extension path: accept an explicit
   // AxTableField* i:type (fieldType), a primitive base type (type), or infer
   // AxTableFieldEnum from enumType — and always emit <EnumType> for enum fields.
-  const fieldsXml = buildAxTableFieldsXml(
-    Array.isArray(properties?.fields) ? properties.fields : [],
-  );
+  const fieldSpecs: AxTableFieldSpec[] =
+    Array.isArray(properties?.fields) ? properties.fields : [];
+  const fieldsXml = buildAxTableFieldsXml(fieldSpecs);
+
+  // An 'Overview' field group holding the table's own fields.
+  //
+  // The five Auto* groups above are all empty, so a table generated here had no
+  // group any form could bind to - while the FORM generator emits
+  // <DataGroup>Overview</DataGroup> for its grid. Generating a table and a form
+  // for it therefore produced a pair that could not compile: "Field group
+  // 'Overview' does not exist", reported against the form, caused by the table.
+  // Populating it here is also the D365FO convention a list-page grid expects.
+  const overviewGroupXml = fieldSpecs.length === 0 ? '' :
+    `\t\t<AxTableFieldGroup>\n` +
+    `\t\t\t<Name>Overview</Name>\n` +
+    `\t\t\t<Label>@SYS9039</Label>\n` +
+    `\t\t\t<Fields>\n` +
+    fieldSpecs.map(f =>
+      `\t\t\t\t<AxTableFieldGroupField>\n\t\t\t\t\t<DataField>${f.name}</DataField>\n\t\t\t\t</AxTableFieldGroupField>\n`,
+    ).join('') +
+    `\t\t\t</Fields>\n` +
+    `\t\t</AxTableFieldGroup>\n`;
 
   // X++ passed in `sourceCode` used to be discarded outright: the caller got a ✅
   // and an empty <Methods /> on disk, discoverable only by reading the file back
@@ -195,7 +214,7 @@ ${propertiesXml}\t<DeleteActions />
 \t\t\t<Name>AutoBrowse</Name>
 \t\t\t<Fields />
 \t\t</AxTableFieldGroup>
-\t</FieldGroups>
+${overviewGroupXml}\t</FieldGroups>
 ${fieldsXml}\t<FullTextIndexes />
 \t<Indexes />
 \t<Mappings />
