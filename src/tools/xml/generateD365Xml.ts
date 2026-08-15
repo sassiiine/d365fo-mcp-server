@@ -7,7 +7,7 @@
 
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { escapeXml } from '../../utils/xmlEscape.js';
-import { buildAxTableXml } from './tableXml.js';
+import { buildAxTableXml, fieldEdt, fieldTypeToAxType, type AxTableFieldSpec } from './tableXml.js';
 import { buildAxFormXml } from './formXml.js';
 import {
   buildAxSecurityDutyXml,
@@ -21,6 +21,9 @@ import { ensureXppDocComment, ensureBlankLineBeforeClosingBrace } from '../../ut
 import { reindentXppSource } from '../../utils/xppFormat.js';
 import { decodeXmlEntitiesFromXppSource } from '../../utils/xmlEscape.js';
 import { buildAxSecurityPrivilegeXml } from './securityPrivilegeXml.js';
+import { validateGeneratedXml, formatFindings } from '../../validation/cloudValidator.js';
+import { resolveFieldElementTypes } from './edtFieldTypes.js';
+import { makeEdtTypeLookup, type EdtTypeLookup } from '../../validation/edtTypeLookup.js';
 import { buildAxDataEntityXml, assertDataEntityIsFunctional } from './dataEntityXml.js';
 import {
   assertKnownEnumValue,
@@ -1121,19 +1124,29 @@ ${enumValuesXml}
 
   static generateAxTableExtensionXml(name: string, properties?: Record<string, any>): string {
     // Fields
-    const fieldSpecs: Array<{
-      name: string; edt?: string; enumType?: string; label?: string; mandatory?: boolean; fieldType?: string;
-    }> = Array.isArray(properties?.fields) ? properties.fields : [];
+    // AxTableFieldSpec rather than a local shape: the local one omitted `type`
+    // and `extendedDataType`, which is how this path drifted away from
+    // buildAxTableFieldsXml in the first place.
+    const fieldSpecs: AxTableFieldSpec[] = Array.isArray(properties?.fields) ? properties.fields : [];
     let fieldsXml: string;
     if (fieldSpecs.length === 0) {
       fieldsXml = '\t<Fields />';
     } else {
       fieldsXml = '\t<Fields>\n';
       for (const f of fieldSpecs) {
-        const iType = f.fieldType ?? (f.enumType ? 'AxTableFieldEnum' : 'AxTableFieldString');
+        // Second copy of the field-rendering logic (buildAxTableFieldsXml is the
+        // other). It had drifted twice over: it read only `f.edt`, dropping an
+        // EDT passed as `extendedDataType`, and it defaulted i:type to
+        // AxTableFieldString whenever fieldType was absent - so a field bound to
+        // AmountMST (real) or TransDate (date) was emitted as a string column,
+        // which xppc reports as a bare "Data type mismatch". Both decisions now
+        // come from the shared helpers so the two copies cannot disagree again.
+        const edt = fieldEdt(f);
+        const iType = f.fieldType
+          ?? fieldTypeToAxType(f.type || (f.enumType ? 'Enum' : 'String'), edt);
         fieldsXml += `\t\t<AxTableField xmlns=""\n\t\t\ti:type="${iType}">\n`;
         fieldsXml += `\t\t\t<Name>${f.name}</Name>\n`;
-        if (f.edt)       fieldsXml += `\t\t\t<ExtendedDataType>${f.edt}</ExtendedDataType>\n`;
+        if (edt)         fieldsXml += `\t\t\t<ExtendedDataType>${edt}</ExtendedDataType>\n`;
         if (f.label)     fieldsXml += `\t\t\t<Label>${escapeXml(f.label)}</Label>\n`;
         if (f.mandatory) fieldsXml += `\t\t\t<Mandatory>Yes</Mandatory>\n`;
         if (f.enumType)  fieldsXml += `\t\t\t<EnumType>${f.enumType}</EnumType>\n`;
@@ -1388,6 +1401,20 @@ ${relationsXml}
 /**
  * Generate D365FO XML handler function
  */
+/**
+ * One EDT lookup for the process, built lazily.
+ *
+ * Constructed on first use rather than at import so a stdio/local server that
+ * never generates anything does not open a Neon pool, and so an unconfigured
+ * deployment simply gets null (validation then skips the rules that need it,
+ * rather than failing).
+ */
+let edtLookup: EdtTypeLookup | null | undefined;
+function getEdtTypeLookup(): EdtTypeLookup | null {
+  if (edtLookup === undefined) edtLookup = makeEdtTypeLookup();
+  return edtLookup;
+}
+
 export async function handleGenerateD365Xml(
   request: CallToolRequest
 ): Promise<any> {
@@ -1450,6 +1477,17 @@ export async function handleGenerateD365Xml(
       throw new Error(`Unsupported object type: ${args.objectType}`);
     }
 
+    // Resolve each field's element type from the EDT it binds BEFORE rendering.
+    // The renderer is synchronous and the answer lives in Neon, so the lookup
+    // has to happen here; doing it inside the template generator would mean
+    // making every caller of it async.
+    if (Array.isArray(args.properties?.fields)) {
+      args.properties.fields = await resolveFieldElementTypes(
+        args.properties.fields as AxTableFieldSpec[],
+        getEdtTypeLookup(),
+      );
+    }
+
     // Generate XML content
     let xmlContent = XmlTemplateGenerator.generate(
       args.objectType,
@@ -1472,11 +1510,31 @@ export async function handleGenerateD365Xml(
       `[generate_d365fo_xml] Generated XML content: ${xmlContent.length} bytes`
     );
 
+    // Validate BEFORE handing the XML over. This is the last point at which a
+    // defect costs nothing: past here the agent writes the file, adds it to a
+    // project and builds, and the compiler reports something several steps
+    // removed from the cause (or, for the boolean case, nothing at all until a
+    // later modify fails). Rules and their evidence: src/validation/cloudValidator.ts
+    const validation = await validateGeneratedXml(xmlContent, {
+      objectType: args.objectType,
+      edtTypes: getEdtTypeLookup(),
+    });
+    const validationReport = formatFindings(validation);
+    const hasErrors = validation.some(f => f.severity === 'error');
+    if (validationReport) {
+      console.error(`[generate_d365fo_xml] validation: ${validation.length} finding(s)`);
+    }
+
     // Construct recommended file path
     const recommendedPath = `K:\\AosService\\PackagesLocalDirectory\\${modelName}\\${modelName}\\${objectFolder}\\${args.objectName}.xml`;
 
-    // Return XML content with instructions
-    const instructions = `✅ Generated D365FO ${args.objectType} XML for: ${args.objectName}
+    // Return XML content with instructions. When validation found errors the
+    // banner says so FIRST: the previous shape led with a green tick, and an
+    // agent that reads the first line and starts writing would carry a known
+    // defect to disk.
+    const instructions = `${hasErrors
+      ? `❌ Generated D365FO ${args.objectType} XML for ${args.objectName} - BUT IT DID NOT PASS VALIDATION.\n\n${validationReport}\n\n⛔ Do NOT write this to disk. Fix the inputs and generate again.\n`
+      : `✅ Generated D365FO ${args.objectType} XML for: ${args.objectName}${validationReport ? `\n\n${validationReport}` : ''}`}
 
 📋 Model: ${modelName}
 📁 Recommended path: ${recommendedPath}
@@ -1518,6 +1576,10 @@ ${xmlContent}
           text: instructions,
         },
       ],
+      // isError so the caller treats a failed validation as a failed generation.
+      // Without it, an agent following "incomplete until isError=false" would
+      // read the response as success and write the defective XML.
+      ...(hasErrors ? { isError: true } : {}),
     };
   } catch (error) {
     console.error(`[generate_d365fo_xml] Error:`, error);

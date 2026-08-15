@@ -22,11 +22,24 @@ import { isYes } from './dataEntityXml.js';
 export interface AxTableFieldSpec {
   name: string;
   edt?: string;
+  /**
+   * Alias for `edt`, accepted because mapXml.ts, generateTableRelation.ts and
+   * the documented op-spec all use this spelling. This path read only `edt`, so
+   * a caller writing `extendedDataType` had the EDT silently dropped: the field
+   * emitted as a bare AxTableFieldString with no <ExtendedDataType> at all, and
+   * nothing reported a problem until the column had the wrong type in the AOT.
+   */
+  extendedDataType?: string;
   type?: string;
   fieldType?: string;
   enumType?: string;
   mandatory?: boolean;
   label?: string;
+}
+
+/** The EDT a field spec names, under either accepted spelling. */
+export function fieldEdt(f: AxTableFieldSpec): string | undefined {
+  return f.edt || f.extendedDataType;
 }
 
 /** X++ source already split by the caller (see XmlTemplateGenerator.parseSourceForBridge). */
@@ -58,11 +71,12 @@ export function buildAxTableFieldsXml(fieldSpecs: AxTableFieldSpec[]): string {
     // Determine i:type: explicit AxTableField* wins; otherwise derive from the
     // primitive type / enumType / EDT name heuristics. NEVER default to
     // AxTableFieldString blindly when an EDT or enumType is present.
+    const edt = fieldEdt(f);
     const iType = f.fieldType
-      ?? fieldTypeToAxType(f.type || (f.enumType ? 'Enum' : 'String'), f.edt);
+      ?? fieldTypeToAxType(f.type || (f.enumType ? 'Enum' : 'String'), edt);
     xml += `\t\t<AxTableField xmlns=""\n\t\t\ti:type="${iType}">\n`;
     xml += `\t\t\t<Name>${f.name}</Name>\n`;
-    if (f.edt)       xml += `\t\t\t<ExtendedDataType>${f.edt}</ExtendedDataType>\n`;
+    if (edt)         xml += `\t\t\t<ExtendedDataType>${edt}</ExtendedDataType>\n`;
     if (f.label)     xml += `\t\t\t<Label>${escapeXml(f.label)}</Label>\n`;
     if (f.mandatory) xml += `\t\t\t<Mandatory>Yes</Mandatory>\n`;
     if (f.enumType)  xml += `\t\t\t<EnumType>${f.enumType}</EnumType>\n`;

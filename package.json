@@ -55,6 +55,7 @@
     "test-stdio": "tsx scripts/test-stdio.ts",
     "db-maintenance": "node --import tsx/esm scripts/db-maintenance.mjs",
     "keys": "tsx scripts/customer-keys.ts",
+    "backfill:edt-types": "tsx scripts/backfill-edt-types.ts",
     "eval:score": "tsx src/eval/oracle/cli.ts",
     "eval:clusters": "tsx src/eval/improver/cli.ts",
     "eval:report": "tsx src/eval/improver/reportCli.ts",
