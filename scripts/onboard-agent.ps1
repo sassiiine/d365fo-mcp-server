@@ -43,7 +43,23 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if (-not $ServerDir) { $ServerDir = Split-Path -Parent $PSScriptRoot }
+if (-not $ServerDir) {
+  # Prefer a checkout when this script is running from inside one (development),
+  # otherwise fall back to a global npm install so a customer needs no git:
+  #   npm i -g github:sassiiine/d365fo-mcp-server
+  $checkout = Split-Path -Parent $PSScriptRoot
+  if (Test-Path (Join-Path $checkout 'dist\index.js')) {
+    $ServerDir = $checkout
+  } else {
+    $globalRoot = (& npm root -g 2>$null | Select-Object -First 1)
+    $installed = if ($globalRoot) { Join-Path $globalRoot 'd365fo-mcp' } else { $null }
+    if ($installed -and (Test-Path (Join-Path $installed 'dist\index.js'))) {
+      $ServerDir = $installed
+    } else {
+      $ServerDir = $checkout   # let the check below produce the actionable error
+    }
+  }
+}
 if (-not $ConfigPath) { $ConfigPath = Join-Path $env:APPDATA 'Code\User\mcp.json' }
 
 function Say([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
@@ -62,7 +78,14 @@ Write-Host "  node $(& node --version)"
 
 $entry = Join-Path $ServerDir 'dist\index.js'
 if (-not (Test-Path $entry)) {
-  throw "No dist\index.js under $ServerDir. Run 'npm install && npm run build' there, or pass -ServerDir."
+  throw @"
+No agent found at $ServerDir\dist\index.js.
+
+Install it (no git, no clone):
+  npm i -g github:sassiiine/d365fo-mcp-server
+
+Then re-run this script. Or pass -ServerDir <path> to point at a checkout.
+"@
 }
 Write-Host "  agent $entry"
 

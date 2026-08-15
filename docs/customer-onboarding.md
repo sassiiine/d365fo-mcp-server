@@ -28,12 +28,29 @@ multi-gigabyte local index — precisely the asset being sold as a service.
 
 ## The procedure
 
+Install the agent — no git, no clone, no build:
+
+```powershell
+npm i -g github:sassiiine/d365fo-mcp-server
+```
+
+Then point it at the hosted server:
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\onboard-agent.ps1 -ApiKey <customer-key> -ModelName <their-model>
 ```
 
 The customer needs no Google account and no `gcloud`. Their API key is the only
 credential.
+
+`onboard-agent.ps1` resolves the agent from a checkout when run inside one, and
+otherwise from the global npm install, so the same script serves development and
+customer machines.
+
+Nothing about the hosted half ships here: the index, the generation logic, the
+validator and the knowledge stay on the server. What lands on the customer's
+disk writes files and runs `xppc` — which has to be local, because that is where
+`PackagesLocalDirectory` and the AOS are.
 
 It checks Node 24+ (`node:sqlite` is core only from 24), locates
 `AosService\PackagesLocalDirectory` by scanning volumes (the drive letter varies
