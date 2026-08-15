@@ -59,6 +59,7 @@ PowerShell / any terminal command **WILL HANG** in VS 2022 / VS 2026 MCP integra
 ### Build automation
 
 4. Never run `build_d365fo_project()` automatically — only on explicit user request ("build", "compile", "check errors").
+5. **Pass `fullBuild: true` before calling anything done.** The default is an INCREMENTAL build, which compiles only changed elements and reports success without revisiting unchanged ones — a model with existing metadata errors returns a green build that means nothing. A task is only "compiles clean" if a full build says so. (The parameter is `fullBuild`; there is no `rebuild`.)
 
 ### X++ correctness (BP-clean code)
 
@@ -97,6 +98,36 @@ PowerShell / any terminal command **WILL HANG** in VS 2022 / VS 2026 MCP integra
 ### Finishing
 
 20. **Keep the closing summary to what changed and what to do next.** Long recaps are the most expensive single output of a session and are re-read by nothing.
+
+## Split (hosted) deployment
+
+Some installations run TWO MCP servers at once, and neither is complete alone.
+If you see both, this section applies; if you see one server with every tool,
+ignore it.
+
+* **`d365fo-cloud`** (HTTP, hosted) — the index and the generation logic:
+  `search`, `get_object_info`, `find_references`, `get_knowledge`,
+  `analyze_code`, `object_patterns`, and `d365fo_file(action="generate")`.
+  It has no filesystem and cannot write or build anything.
+* **`d365fo-local`** (stdio, this machine) — `d365fo_file(action="create"/"modify")`,
+  `build_d365fo_project`, `verify_d365fo_project`, `undo_last_modification`,
+  `trigger_db_sync`. It has NO symbol index.
+
+Consequences worth internalising, because each one otherwise reads as a bug:
+
+21. **Do not look for `search` or `get_knowledge` locally.** They are absent by
+    design, not broken. Discovery goes to the cloud server, writes go to the
+    local one. Both publish `d365fo_file`, so name the server you mean.
+22. **The normal flow is generate → create.** Ask the cloud for XML, then hand
+    that XML to the local server as `xmlContent`. Do not retype or "tidy" it in
+    between: it was validated as generated, and an edit invalidates that.
+23. **A generate that returns `isError` has failed validation.** The XML is
+    known-defective — the response says which rule and why. Fix the inputs and
+    generate again. Never write it to disk because it "looks fine".
+24. **Creating a MODEL is not a tool.** No MCP tool creates a model, a
+    `.rnrproj`, or the PackagesLocalDirectory link. If the target model does not
+    exist, stop and tell the user to run `scripts/setup-model.ps1` — do not
+    attempt it with file operations.
 
 ## Full Instructions
 
