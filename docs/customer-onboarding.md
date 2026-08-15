@@ -32,6 +32,9 @@ multi-gigabyte local index — precisely the asset being sold as a service.
 powershell -ExecutionPolicy Bypass -File scripts\onboard-agent.ps1 -ApiKey <customer-key> -ModelName <their-model>
 ```
 
+The customer needs no Google account and no `gcloud`. Their API key is the only
+credential.
+
 It checks Node 24+ (`node:sqlite` is core only from 24), locates
 `AosService\PackagesLocalDirectory` by scanning volumes (the drive letter varies
 by VM image), identifies custom models by AOT **layer** in the Descriptor XML
@@ -47,24 +50,27 @@ there is a single shared key in Secret Manager (`d365fo-mcp-api-key`) — that i
 fine for testing and **not** shippable. Per-customer keys with revocation are
 the prerequisite for charging anyone.
 
-## Current limitation: the endpoint is not public
+## How the endpoint is reachable without Google credentials
 
-Org policy `constraints/iam.allowedPolicyMemberDomains` (console name: **Domain
-restricted sharing**) forbids granting `allUsers` the `run.invoker` role, so
-Cloud Run rejects callers from outside the Workspace domain *before* the API key
-is ever checked. A customer cannot connect at all.
+The service carries `run.googleapis.com/invoker-iam-disabled: 'true'` — Cloud
+Run's **Security → Authentication → Allow public access** setting. That switches
+the IAM invoker check *off* rather than granting `allUsers` the `run.invoker`
+role.
 
-Until that is lifted, onboarding requires `-WithIdentityToken`, which mints a
-Google identity token valid for about an hour. That is a testing crutch, not a
-customer path.
+The distinction is worth keeping in mind, because the two look identical from
+the outside and only one of them works here. Granting `allUsers` is refused by
+the org policy `constraints/iam.allowedPolicyMemberDomains` ("Domain restricted
+sharing"), which limits IAM members to the Workspace customer ID — and no IAM
+role, Owner included, overrides it. Disabling the check needs no IAM binding at
+all, so the policy never applies. `gcloud run deploy --allow-unauthenticated`
+takes the first route and fails; the console setting takes the second.
 
-The fix is an org-level grant of **Organization Policy Administrator**
-(`roles/orgpolicy.policyAdmin`) to someone who can then override Domain
-restricted sharing for the `dynamics-mcp` project (Allow All). Project Owner is
-not sufficient — the policy outranks IAM roles. The alternative, if the
-exception is refused, is an external Application Load Balancer in front of the
-service (~$18/month for the forwarding rule), which holds `run.invoker` as an
-in-domain identity.
+Consequence: `gcloud run services get-iam-policy` shows **no invoker bindings**
+on a service that is fully public. Do not read that as "not exposed".
+
+With the check off, the app's `API_KEY` is the *only* thing between the internet
+and the index. A single shared key is not good enough to charge for — per
+customer keys with revocation are the prerequisite.
 
 ## Verifying an onboarding worked
 

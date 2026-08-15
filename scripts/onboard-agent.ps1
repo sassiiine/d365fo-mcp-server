@@ -38,12 +38,7 @@ param(
 
   # Where to write the MCP client config. Defaulted in the body to the VS Code
   # user-level file, which applies to every workspace on the machine.
-  [string] $ConfigPath,
-
-  # Interim only: the hosted service currently requires a Google identity token
-  # because org policy forbids granting allUsers the run.invoker role. Once that
-  # exception is in place this switch goes away and the API key alone is enough.
-  [switch] $WithIdentityToken
+  [string] $ConfigPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -117,22 +112,15 @@ if (-not $ModelName -and $pld) {
 # ----------------------------------------------------------- cloud reachability
 Say 'Checking the hosted server'
 
-$authHeader = $null
-if ($WithIdentityToken) {
-  $gcloud = 'C:\Program Files (x86)\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd'
-  if (-not (Test-Path $gcloud)) { throw '-WithIdentityToken needs the Google Cloud SDK installed.' }
-  $tok = (& $gcloud auth print-identity-token) -join ''
-  if (-not $tok.StartsWith('ey')) { throw 'Could not mint an identity token. Run: gcloud auth login' }
-  $authHeader = "Bearer $tok"
-  Warn 'Identity token expires in ~1 hour. Interim measure until allUsers can hold run.invoker.'
-}
-
-$probeArgs = @('-s', '-m', '30', '-o', 'NUL', '-w', '%{http_code}', "$CloudUrl/health")
-if ($authHeader) { $probeArgs = @('-H', "Authorization: $authHeader") + $probeArgs }
-$code = & curl.exe @probeArgs
+# No Google credentials of any kind. The service runs with
+# run.googleapis.com/invoker-iam-disabled=true, so Cloud Run performs no IAM
+# check and the customer needs nothing but their API key.
+$code = & curl.exe -s -m 30 -o NUL -w '%{http_code}' "$CloudUrl/health"
 if ($code -ne '200') {
   Warn "Health probe returned HTTP $code (expected 200)."
-  if ($code -eq '403') { Warn 'A 403 here means IAM rejected the caller, not that the key is wrong.' }
+  # A 403 means Cloud Run rejected the caller before the app saw the request, so
+  # it is never a wrong-key problem - it means public access got switched off.
+  if ($code -eq '403') { Warn 'HTTP 403 = Cloud Run IAM refused the caller. Re-enable Security -> Allow public access.' }
 } else {
   Write-Host "  cloud reachable ($CloudUrl)"
 }
@@ -148,7 +136,6 @@ if ($ModelName) {
 }
 
 $cloudHeaders = [ordered]@{ 'X-Api-Key' = $ApiKey }
-if ($authHeader) { $cloudHeaders['Authorization'] = $authHeader }
 
 $cfg = [ordered]@{
   servers = [ordered]@{

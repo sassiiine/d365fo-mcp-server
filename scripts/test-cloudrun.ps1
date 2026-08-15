@@ -4,12 +4,17 @@
 #
 #   pwsh scripts/test-cloudrun.ps1
 #
-# Two credentials are needed and neither is printed:
-#   * a Google identity token, because org policy
-#     (constraints/iam.allowedPolicyMemberDomains) forbids granting allUsers the
-#     run.invoker role, so the service is not publicly reachable;
-#   * the app's own API key from Secret Manager, which the X-Api-Key middleware
-#     checks (src/middleware/apiKeyAuth.ts).
+# The only credential is the app's own API key, read from Secret Manager and
+# never printed. The X-Api-Key middleware (src/middleware/apiKeyAuth.ts) is the
+# whole gate.
+#
+# No Google identity token is involved. The service carries
+# run.googleapis.com/invoker-iam-disabled=true, which switches OFF Cloud Run's
+# IAM invoker check rather than granting allUsers the run.invoker role. That
+# distinction matters: granting allUsers is refused by the org policy
+# constraints/iam.allowedPolicyMemberDomains, while disabling the check needs no
+# IAM binding at all and so the policy never applies. Set it in the console under
+# Security -> Authentication -> Allow public access.
 
 param(
   [string] $Project = 'dynamics-mcp',
@@ -21,9 +26,8 @@ $ErrorActionPreference = 'Stop'
 $gcloud = 'C:\Program Files (x86)\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd'
 
 $url = & $gcloud run services describe $Service --region=$Region --project=$Project --format='value(status.url)'
-$tok = (& $gcloud auth print-identity-token) -join ''
 $key = (& $gcloud secrets versions access latest --secret=d365fo-mcp-api-key --project=$Project) -join ''
-if (-not $tok.StartsWith('ey')) { throw "no identity token - run: gcloud auth login" }
+if (-not $key) { throw "could not read the API key - run: gcloud auth login" }
 
 $work = Join-Path $env:TEMP "d365fo-cloudtest"
 New-Item -ItemType Directory -Force -Path $work | Out-Null
@@ -35,7 +39,7 @@ function Invoke-Mcp([string] $Body, [string] $Name) {
   # curl.exe, not Invoke-WebRequest: PS 5.1 tries to prompt for credentials on a
   # 401/403 and dies in non-interactive mode.
   $out = & curl.exe -s -m 120 -X POST "$url/mcp" `
-    -H "Authorization: Bearer $tok" -H "X-Api-Key: $key" `
+    -H "X-Api-Key: $key" `
     -H "Content-Type: application/json" `
     -H "Accept: application/json, text/event-stream" `
     --data-binary "@$f"
@@ -50,9 +54,9 @@ function Invoke-Mcp([string] $Body, [string] $Name) {
 Write-Output "service: $url"
 Write-Output ""
 
-# 1. Health. Unauthenticated at the app layer by design (Cloud Run's startup
-#    probe has no API key), but still behind the Google IAM check.
-$h = & curl.exe -s -m 60 -H "Authorization: Bearer $tok" "$url/health"
+# 1. Health. Deliberately open: Cloud Run's startup probe carries no API key, so
+#    apiKeyAuth exempts /health. It reports readiness and a symbol count only.
+$h = & curl.exe -s -m 60 "$url/health"
 Write-Output "health:  $h"
 Write-Output ""
 
@@ -65,7 +69,7 @@ Write-Output ""
 $nk = Join-Path $work "nokey.json"
 [IO.File]::WriteAllText($nk, '{"jsonrpc":"2.0","id":0,"method":"tools/list"}')
 $noKey = & curl.exe -s -o NUL -w "%{http_code}" -m 60 -X POST "$url/mcp" `
-  -H "Authorization: Bearer $tok" -H "Content-Type: application/json" `
+  -H "Content-Type: application/json" `
   -H "Accept: application/json, text/event-stream" `
   --data-binary "@$nk"
 Write-Output "no API key -> HTTP $noKey  (expect 401)"
