@@ -19,7 +19,7 @@ import {
 } from '../../utils/suggestionEngine.js';
 import { tryBridgeSearch } from '../../bridge/bridgeAdapter.js';
 import { indexedPathIsMissing, renderStaleSearchRowsNote } from '../../utils/indexedXmlLookup.js';
-import { lookupSymbolsNocase } from '../../utils/symbolLookup.js';
+import { searchBackend, type ISearchIndex } from '../../metadata/searchBackend.js';
 import { rankCustomFirst, isExactNameMatch } from '../../utils/exactMatchRanking.js';
 import { isCustomModel } from '../../utils/modelClassifier.js';
 
@@ -35,23 +35,17 @@ import { isCustomModel } from '../../utils/modelClassifier.js';
  *
  * Returns [] on any failure — the exact-first repair must never break search.
  */
-export function probeExactMatches(
-  symbolIndex: any,
+export async function probeExactMatches(
+  index: ISearchIndex,
   query: string,
   types?: string[],
-): Array<{ name: string; type: string; model?: string; filePath?: string }> {
-  if (!query || /[\s*"%]/.test(query)) return [];
+): Promise<Array<{ name: string; type: string; model?: string; filePath?: string }>> {
+  // Routed through the ISearchIndex seam rather than reaching into raw SQLite
+  // via getReadDb(): that call has no meaning when the index lives in Neon, and
+  // a cloud container has no local database file at all. Guards and the
+  // never-throw contract now live in the backends.
   try {
-    const db = symbolIndex?.getReadDb?.();
-    if (!db) return [];
-    return lookupSymbolsNocase(db, query, { types, limit: 5 })
-      .filter(hit => isExactNameMatch(query, hit.name))
-      .map(hit => ({
-        name: hit.name,
-        type: hit.type,
-        model: hit.model ?? undefined,
-        filePath: hit.file_path ?? undefined,
-      }));
+    return await index.lookupExactNames(query, types, 5);
   } catch {
     return [];
   }
@@ -70,15 +64,14 @@ export function probeExactMatches(
  *
  * Returns [] on any failure — the custom-first repair must never break search.
  */
-export function probeCustomMatches(
-  symbolIndex: any,
+export async function probeCustomMatches(
+  index: ISearchIndex,
   query: string,
   types?: string[],
   limit = 15,
-): Array<{ name: string; type: string; model?: string; filePath?: string }> {
-  if (!query) return [];
+): Promise<Array<{ name: string; type: string; model?: string; filePath?: string }>> {
   try {
-    const hits = symbolIndex?.searchCustomModelSymbols?.(query, types, limit) ?? [];
+    const hits = await index.searchCustomModelSymbols(query, types, limit);
     return hits.map((hit: any) => ({
       name: hit.name,
       type: hit.type,
@@ -165,8 +158,9 @@ export async function searchTool(request: CallToolRequest, context: XppServerCon
     // of the Microsoft-dominated bridge window are spliced back in and
     // prioritized (never "only Microsoft objects").
     const searchTypes = args.type === 'all' ? undefined : [args.type];
-    const exactMatches = await dropStaleRows(probeExactMatches(symbolIndex, args.query, searchTypes));
-    const customMatches = await dropStaleRows(probeCustomMatches(symbolIndex, args.query, searchTypes));
+    const index = searchBackend(context);
+    const exactMatches = await dropStaleRows(await probeExactMatches(index, args.query, searchTypes));
+    const customMatches = await dropStaleRows(await probeCustomMatches(index, args.query, searchTypes));
     const bridgeResult = await tryBridgeSearch(
       context.bridge,
       args.query,
@@ -177,7 +171,7 @@ export async function searchTool(request: CallToolRequest, context: XppServerCon
     if (bridgeResult) return bridgeResult;
 
     // Standard external metadata search
-    return await performExternalSearch(args, symbolIndex);
+    return await performExternalSearch(args, symbolIndex, index);
   } catch (error) {
     return {
       content: [
@@ -349,28 +343,29 @@ async function performHybridSearch(
 async function performExternalSearch(
   args: z.infer<typeof SearchArgsSchema>,
   symbolIndex: any,
+  index: ISearchIndex,
 ) {
   try {
     const types = args.type === 'all' ? undefined : [args.type];
-    // NOT yet routed through the ISearchIndex seam (metadata/searchBackend.ts):
-    // this pipeline layers local-only enrichment on the raw hits
-    // (probeExactMatches/probeCustomMatches/getAllSymbolNames/getSymbolsByTerm/
-    // markStaleRows), which needs a real Neon-side reimplementation + live
-    // validation, not a mechanical await. Tracked as the follow-up port.
-    const raw: any[] = symbolIndex.searchSymbols(args.query, args.limit, types) || [];
+    // The three index reads here now go through the ISearchIndex seam, so this
+    // path works against Neon. What is still local-only is the ENRICHMENT layered
+    // on top (getAllSymbolNames/getSymbolsByTerm for suggestions, and markStaleRows,
+    // which checks the local filesystem by design). Those degrade to "no
+    // suggestions" rather than failing when the local index is empty.
+    const raw: any[] = (await index.searchSymbols(args.query, args.limit, types)) || [];
 
     // #15: FTS5 `ORDER BY rank` scores token frequency, not name equality, so an
     // exact-name hit can be missing from (or buried inside) the window. Probe for
     // it on-index and rank it first.
     const seen = new Set(raw.map(r => `${String(r.name).toLowerCase()} ${r.type}`));
-    const missingExact = probeExactMatches(symbolIndex, args.query, types)
+    const missingExact = (await probeExactMatches(index, args.query, types))
       .filter(hit => !seen.has(`${hit.name.toLowerCase()} ${hit.type}`));
     for (const hit of missingExact) seen.add(`${hit.name.toLowerCase()} ${hit.type}`);
 
     // Custom/ISV matches are likewise buried under the Microsoft-dominated FTS
     // window, so splice any the window missed and mark every custom hit so
     // rankCustomFirst can lift them just behind the exact matches.
-    const customProbe = probeCustomMatches(symbolIndex, args.query, types);
+    const customProbe = await probeCustomMatches(index, args.query, types);
     const customKeys = new Set(customProbe.map(h => `${h.name.toLowerCase()} ${h.type}`));
     const missingCustom = customProbe
       .filter(hit => !seen.has(`${hit.name.toLowerCase()} ${hit.type}`));

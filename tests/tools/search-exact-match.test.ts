@@ -21,6 +21,7 @@ import { tryBridgeSearch } from '../../src/bridge/bridgeAdapter';
 import type { BridgeClient } from '../../src/bridge/bridgeClient';
 import { rankExactFirst, exactMatchRank } from '../../src/utils/exactMatchRanking';
 import { probeExactMatches } from '../../src/tools/analysis/search';
+import { SqliteSearchAdapter } from '../../src/metadata/searchBackend';
 
 // ── ranking primitive ────────────────────────────────────────────────────────
 
@@ -137,27 +138,33 @@ function makeIndexDb() {
   return db;
 }
 
+// The probe now takes an ISearchIndex rather than the raw symbol index, so the
+// same read works whether the index is local SQLite or Neon. These tests keep
+// exercising the SQLite path — and therefore the same SQL — by wrapping the fake
+// index in the adapter, which is what calls getReadDb() internally.
+const localIndex = (fake: unknown) => new SqliteSearchAdapter(() => fake as never);
+
 describe('probeExactMatches — index-safe exact probe (#15)', () => {
-  it('finds the exact EDT the FTS ranking buried', () => {
+  it('finds the exact EDT the FTS ranking buried', async () => {
     const db = makeIndexDb();
-    const hits = probeExactMatches({ getReadDb: () => db }, 'Num', ['edt']);
+    const hits = await probeExactMatches(localIndex({ getReadDb: () => db }), 'Num', ['edt']);
     expect(hits.map(h => h.name)).toEqual(['Num']);
     expect(hits[0].type).toBe('edt');
   });
 
-  it('resolves a differently-cased query without COLLATE NOCASE as the primary predicate', () => {
+  it('resolves a differently-cased query without COLLATE NOCASE as the primary predicate', async () => {
     const db = makeIndexDb();
-    const hits = probeExactMatches({ getReadDb: () => db }, 'num', ['edt']);
+    const hits = await probeExactMatches(localIndex({ getReadDb: () => db }), 'num', ['edt']);
     expect(hits.map(h => h.name)).toEqual(['Num']);
   });
 
-  it('never emits an unindexed LIKE or a bare COLLATE NOCASE scan (2 GB DB constraint)', () => {
+  it('never emits an unindexed LIKE or a bare COLLATE NOCASE scan (2 GB DB constraint)', async () => {
     const db = makeIndexDb();
     const seen: string[] = [];
     const realPrepare = db.prepare.bind(db);
     (db as any).prepare = (sql: string) => { seen.push(sql); return realPrepare(sql); };
 
-    probeExactMatches({ getReadDb: () => db }, 'num', ['edt']);
+    await probeExactMatches(localIndex({ getReadDb: () => db }), 'num', ['edt']);
 
     expect(seen.length).toBeGreaterThan(0);
     for (const sql of seen) {
@@ -170,14 +177,17 @@ describe('probeExactMatches — index-safe exact probe (#15)', () => {
     expect(seen[0]).toMatch(/s\.name = \?/);
   });
 
-  it('returns [] instead of throwing when there is no readable DB', () => {
-    expect(probeExactMatches({}, 'Num', ['edt'])).toEqual([]);
-    expect(probeExactMatches({ getReadDb: () => { throw new Error('closed'); } }, 'Num', ['edt'])).toEqual([]);
+  it('returns [] instead of throwing when there is no readable DB', async () => {
+    expect(await probeExactMatches(localIndex({}), 'Num', ['edt'])).toEqual([]);
+    expect(await probeExactMatches(
+      localIndex({ getReadDb: () => { throw new Error('closed'); } }), 'Num', ['edt'],
+    )).toEqual([]);
   });
 
-  it('skips multi-token / wildcard queries — those are not name lookups', () => {
+  it('skips multi-token / wildcard queries — those are not name lookups', async () => {
     const db = makeIndexDb();
-    expect(probeExactMatches({ getReadDb: () => db }, 'Num ber', ['edt'])).toEqual([]);
-    expect(probeExactMatches({ getReadDb: () => db }, 'Num*', ['edt'])).toEqual([]);
+    const idx = localIndex({ getReadDb: () => db });
+    expect(await probeExactMatches(idx, 'Num ber', ['edt'])).toEqual([]);
+    expect(await probeExactMatches(idx, 'Num*', ['edt'])).toEqual([]);
   });
 });
