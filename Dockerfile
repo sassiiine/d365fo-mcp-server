@@ -20,8 +20,14 @@ FROM node:24-slim AS builder
 WORKDIR /app
 
 # Lockfile-only layer so `npm ci` is cached across source edits.
+#
+# --ignore-scripts is required, not tidiness: package.json has a `prepare` script
+# (which is what makes `npm i -g github:...` work for customers), and npm runs
+# `prepare` on install. Here that would run `tsc` at a point where only the
+# lockfile has been copied and src/ does not exist yet, failing the build. The
+# explicit `npm run build` below is the one that matters.
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 
 COPY tsconfig.json ./
 COPY src ./src
@@ -46,7 +52,10 @@ ENV MCP_FORCE_HTTP=true
 ENV MCP_SERVER_MODE=read-only
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# --ignore-scripts again: `prepare` would try to build here, and this stage has
+# no devDependencies (no tsc, no esbuild) and no sources. dist/ is copied from
+# the builder below.
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
 
