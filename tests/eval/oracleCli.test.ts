@@ -31,8 +31,21 @@ const CLI = path.join(REPO_ROOT, 'src', 'eval', 'oracle', 'cli.ts');
 /** Run the oracle CLI (VM-free) as a subprocess; capture exit code + combined output
  *  (the CLI prints its scorecard to stderr, so both streams are merged). */
 function runOracleCli(args: string[]): { status: number; out: string } {
-  const r = spawnSync('npx', ['tsx', CLI, ...args], {
-    cwd: REPO_ROOT, encoding: 'utf8', shell: true,
+  // No `shell: true`. With a shell, arguments are concatenated rather than
+  // escaped (Node's own DEP0190 warning), so a repo checked out to a path
+  // containing a space — "…\New folder\…" — reached tsx as two arguments and
+  // died with ERR_MODULE_NOT_FOUND on "C:\Users\…\Documents\New". The test then
+  // failed for a reason that had nothing to do with the CLI it was testing.
+  //
+  // Nor the tsx shim in node_modules/.bin: Node 24 refuses to spawn .cmd/.bat
+  // without a shell (the CVE-2024-27980 fix) and returns silently with no
+  // output, which reads as "the CLI printed nothing".
+  //
+  // `node --import tsx/esm` is the form the package scripts already use, and it
+  // spawns the real executable with argv passed as an array, so a space in the
+  // path is just a character.
+  const r = spawnSync(process.execPath, ['--import', 'tsx/esm', CLI, ...args], {
+    cwd: REPO_ROOT, encoding: 'utf8',
   });
   return { status: r.status ?? 1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
