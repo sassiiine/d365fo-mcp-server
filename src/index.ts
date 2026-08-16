@@ -872,6 +872,7 @@ async function main() {
           { name: 'validate_object_naming',       desc: 'Validate proposed extensions and object names against D365FO conventions' },
           { name: 'get_workspace_info',           desc: 'Detected workspace paths, model name, project file, and server mode' },
           { name: 'verify_d365fo_project',        desc: 'Verify objects exist on disk and are referenced in the .rnrproj project file' },
+          { name: 'create_d365fo_model',          desc: 'Create a new model: descriptor, AOT folders, .rnrproj and the packages link' },
         ]},
         { icon: '🏗️ ', category: 'SDLC & Build Tools', tools: [
           { name: 'update_symbol_index',          desc: 'Re-index a file changed outside this server (create/modify refresh it themselves)' },

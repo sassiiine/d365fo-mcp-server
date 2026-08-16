@@ -67,6 +67,7 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
 
   // Diagnostics
   get_workspace_info:               read('Read workspace configuration'),
+  create_d365fo_model:              write('Create a D365FO model'),
   verify_d365fo_project:            read('Verify D365FO project'),
   review_workspace_changes:         read('Review workspace changes'),
   run_bp_check:                     read('Run Best Practices check'),
