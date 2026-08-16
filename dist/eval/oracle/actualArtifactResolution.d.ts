@@ -1,0 +1,57 @@
+/**
+ * Multi-artifact (`--actual-dir`) actual-file resolution for src/eval/oracle/cli.ts.
+ * Pure logic + fs reads — no CLI argv/process side effects — split out so it can be
+ * unit-tested without triggering the CLI script's `main()` (docs/AGENT_EVAL_LOOP.md §6).
+ */
+import { type PrefixSpec } from './prefix.js';
+/**
+ * Resolve the actual-dir file matching a golden artifact filename. Tries an
+ * exact filename match first (fast path, and the only path when golden and
+ * actual happen to share the same EXTENSION_PREFIX session); if that misses,
+ * falls back to matching on the PREFIX-CANONICALISED filename (the golden's
+ * filename is itself typically a prefixed object name, e.g.
+ * "ContosoMyContract.metadata.xml", produced under a different session than the
+ * one that generated the actual artifacts) so a whole L3/L4 multi-artifact
+ * case doesn't spuriously score every artifact as missing/extra under prefix
+ * drift alone.
+ *
+ * The fallback compares LOGICAL ARTIFACT KEYS (`artifactKey`), not merely
+ * prefix-canonicalised filenames, so a legacy golden filename
+ * (`DemoEnumExtProbe.AxClass.metadata.xml` — unprefixed stem, `.Ax<Type>`
+ * infix) still pairs with the actual file the VM produced
+ * (`ConDemoEnumExtProbe.metadata.xml`). See artifactKey.ts and
+ * docs/eval-sweep-findings-2026-07-21.md #2.
+ */
+export declare function resolveActualFile(actualDir: string, goldenName: string, goldenPrefix: PrefixSpec, actualPrefix: PrefixSpec): string | undefined;
+/**
+ * Build the `actualArtifacts` map for a multi-artifact (`--actual-dir`) run,
+ * one entry per golden artifact name.
+ *
+ * Regression: this used to key every entry by the GOLDEN's own filename
+ * (`actualArtifacts[name] = ...` inside a `for (const name of
+ * artifactNames)` loop) even when the resolved actual file had a DIFFERENT
+ * literal prefix (e.g. golden "ContosoMyContract.metadata.xml" resolved to actual
+ * file "DemoMyContract.metadata.xml" under prefix-agnostic matching —
+ * `resolveActualFile`'s whole point). `evaluateMulti`/`normalizeMultiArtifact`
+ * then canonicalises each artifact KEY with `actualPrefix` — but a key that's
+ * still the GOLDEN's literal name doesn't contain `actualPrefix` at all, so
+ * `canonicalizePrefix` is a no-op on it, and the golden side's key (correctly
+ * canonicalised from ITS OWN prefix) never matches. Every path in the
+ * artifact then shows up as wholesale `missing` (under the golden's canonical
+ * key) AND `extra` (under the actual's un-canonicalised key), even when the
+ * content is byte-identical. Keying by the RESOLVED actual file's own
+ * basename (which DOES contain `actualPrefix`) fixes the canonicalisation on
+ * both sides consistently — matching the documented multi-artifact contract
+ * (src/eval/oracle/normalize.ts's `normalizeMultiArtifact` doc comment).
+ *
+ * A golden artifact with NO resolvable actual file (genuinely missing, not a
+ * prefix-matching miss) keeps the golden's own name as the key with empty
+ * content — unchanged from before; there is no real actual basename to key it
+ * by, and the empty content correctly registers every one of that artifact's
+ * paths as `missing`.
+ */
+export declare function buildActualArtifactsMap(actualDir: string, artifactNames: string[], goldenPrefix: PrefixSpec, actualPrefix: PrefixSpec): {
+    actualArtifacts: Record<string, string>;
+    matchedActualFiles: Set<string>;
+};
+//# sourceMappingURL=actualArtifactResolution.d.ts.map

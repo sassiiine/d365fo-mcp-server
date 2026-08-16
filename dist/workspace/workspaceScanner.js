@@ -1,0 +1,260 @@
+/**
+ * Workspace Scanner
+ * Scans local X++ files in workspace for hybrid analysis
+ */
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { parseStringPromise } from '../utils/xml.js';
+import { isFileUnderRoot } from '../utils/pathContainment.js';
+/**
+ * Directories never worth walking in a D365FO workspace. fs.glob's `exclude`
+ * callback is handed the plain entry NAME (not a path), and returning true for
+ * a directory prunes the whole subtree — which is why this is a name set rather
+ * than the `**​/node_modules/**` style patterns the glob package took.
+ *
+ * The callback form is used deliberately over `exclude: string[]`: the callback
+ * has been supported since fs.glob landed, the pattern-array form is newer, and
+ * an unsupported option here would be ignored silently rather than throwing.
+ */
+const SKIPPED_DIRS = new Set(['node_modules', 'bin', 'obj', '.git']);
+export class WorkspaceScanner {
+    workspaceCache = new Map();
+    /** Cache TTL; paired with invalidate() (called after writes) to keep results current without an fs.watch. Lazy expiry — no background timer. */
+    static CACHE_TTL_MS = 15_000;
+    /**
+     * Scan workspace for X++ files
+     */
+    async scanWorkspace(workspacePath) {
+        // Serve from cache while still fresh (lazy expiry).
+        const cached = this.workspaceCache.get(workspacePath);
+        if (cached && Date.now() - cached.scannedAt < WorkspaceScanner.CACHE_TTL_MS) {
+            return cached.files;
+        }
+        const files = [];
+        // Find all .xml files (D365FO metadata files). fs.glob yields cwd-relative
+        // paths, so resolve them here — the glob package's `absolute: true` did it.
+        const xmlFiles = [];
+        for await (const relPath of fs.glob('**/*.xml', {
+            cwd: workspacePath,
+            exclude: name => SKIPPED_DIRS.has(name),
+        })) {
+            xmlFiles.push(path.resolve(workspacePath, relPath));
+        }
+        for (const filePath of xmlFiles) {
+            // Reject symlinks that resolve outside the workspace root.
+            if (!isFileUnderRoot(filePath, workspacePath)) {
+                console.warn(`[WorkspaceScanner] Skipping ${filePath} — resolves outside workspace root ${workspacePath}`);
+                continue;
+            }
+            const stat = await fs.stat(filePath);
+            const fileName = path.basename(filePath, '.xml');
+            const type = this.detectFileType(filePath);
+            files.push({
+                path: filePath,
+                name: fileName,
+                type,
+                lastModified: stat.mtime,
+            });
+        }
+        this.workspaceCache.set(workspacePath, { files, scannedAt: Date.now() });
+        return files;
+    }
+    /**
+     * Drop cached scan results so the next scanWorkspace re-reads from disk.
+     * Call after a write (create/modify/undo) so "recently edited" and the
+     * active-file resolution reflect the change immediately.
+     */
+    invalidate(workspacePath) {
+        if (workspacePath) {
+            this.workspaceCache.delete(workspacePath);
+        }
+        else {
+            this.workspaceCache.clear();
+        }
+    }
+    /**
+     * Read content of specific file
+     */
+    async readFile(filePath) {
+        return await fs.readFile(filePath, 'utf-8');
+    }
+    /**
+     * Search X++ symbols in workspace files
+     */
+    async searchInWorkspace(workspacePath, query, type) {
+        const files = await this.scanWorkspace(workspacePath);
+        return files.filter((file) => {
+            if (type && file.type !== type)
+                return false;
+            return file.name.toLowerCase().includes(query.toLowerCase());
+        });
+    }
+    /**
+     * Detect file type from path
+     */
+    detectFileType(filePath) {
+        if (filePath.includes('\\AxClass\\') || filePath.includes('/AxClass/')) {
+            return 'class';
+        }
+        if (filePath.includes('\\AxTable\\') || filePath.includes('/AxTable/')) {
+            return 'table';
+        }
+        if (filePath.includes('\\AxForm\\') || filePath.includes('/AxForm/')) {
+            return 'form';
+        }
+        if (filePath.includes('\\AxEnum\\') || filePath.includes('/AxEnum/')) {
+            return 'enum';
+        }
+        return 'unknown';
+    }
+    /**
+     * Get statistics about workspace
+     */
+    async getWorkspaceStats(workspacePath) {
+        const files = await this.scanWorkspace(workspacePath);
+        return {
+            totalFiles: files.length,
+            classes: files.filter((f) => f.type === 'class').length,
+            tables: files.filter((f) => f.type === 'table').length,
+            forms: files.filter((f) => f.type === 'form').length,
+            enums: files.filter((f) => f.type === 'enum').length,
+        };
+    }
+    /**
+     * Parse XML metadata from file
+     */
+    async parseXmlFile(filePath) {
+        try {
+            const content = await fs.readFile(filePath, 'utf-8');
+            const xml = await parseStringPromise(content, { explicitArray: false });
+            const type = this.detectFileType(filePath);
+            switch (type) {
+                case 'class':
+                    return this.parseClassXml(xml);
+                case 'table':
+                    return this.parseTableXml(xml);
+                default:
+                    return undefined;
+            }
+        }
+        catch (error) {
+            console.warn(`Failed to parse ${filePath}:`, error);
+            return undefined;
+        }
+    }
+    /**
+     * Parse AxClass XML structure
+     */
+    parseClassXml(xml) {
+        const classNode = xml.AxClass;
+        if (!classNode)
+            return {};
+        const metadata = {
+            methods: [],
+            fields: [],
+            properties: {},
+        };
+        if (classNode.Extends) {
+            metadata.extends = classNode.Extends;
+        }
+        if (classNode.Implements) {
+            metadata.implements = Array.isArray(classNode.Implements)
+                ? classNode.Implements
+                : [classNode.Implements];
+        }
+        if (classNode.MethodInfo) {
+            const methods = Array.isArray(classNode.MethodInfo)
+                ? classNode.MethodInfo
+                : [classNode.MethodInfo];
+            for (const method of methods) {
+                if (method?.Name) {
+                    metadata.methods.push({
+                        name: method.Name,
+                        returnType: method.ReturnType || 'void',
+                        params: method.Parameters || '',
+                        signature: `${method.ReturnType || 'void'} ${method.Name}(${method.Parameters || ''})`,
+                        isStatic: method.Static === 'Yes',
+                    });
+                }
+            }
+        }
+        return metadata;
+    }
+    /**
+     * Parse AxTable XML structure
+     */
+    parseTableXml(xml) {
+        const tableNode = xml.AxTable;
+        if (!tableNode)
+            return {};
+        const metadata = {
+            fields: [],
+            methods: [],
+            properties: {},
+        };
+        if (tableNode.Label) {
+            metadata.properties.label = tableNode.Label;
+        }
+        if (tableNode.Fields?.AxTableField) {
+            const fields = Array.isArray(tableNode.Fields.AxTableField)
+                ? tableNode.Fields.AxTableField
+                : [tableNode.Fields.AxTableField];
+            for (const field of fields) {
+                if (field?.Name) {
+                    metadata.fields.push({
+                        name: field.Name,
+                        type: field.Type || 'String',
+                        edt: field.ExtendedDataType,
+                        mandatory: field.Mandatory === 'Yes',
+                    });
+                }
+            }
+        }
+        // Tables can have methods too.
+        if (tableNode.MethodInfo) {
+            const methods = Array.isArray(tableNode.MethodInfo)
+                ? tableNode.MethodInfo
+                : [tableNode.MethodInfo];
+            for (const method of methods) {
+                if (method?.Name) {
+                    metadata.methods.push({
+                        name: method.Name,
+                        returnType: method.ReturnType || 'void',
+                        params: method.Parameters || '',
+                        signature: `${method.ReturnType || 'void'} ${method.Name}(${method.Parameters || ''})`,
+                    });
+                }
+            }
+        }
+        return metadata;
+    }
+    /**
+     * Get file with parsed metadata
+     */
+    async getFileWithMetadata(filePath) {
+        try {
+            const stat = await fs.stat(filePath);
+            const fileName = path.basename(filePath, '.xml');
+            const type = this.detectFileType(filePath);
+            const metadata = await this.parseXmlFile(filePath);
+            return {
+                path: filePath,
+                name: fileName,
+                type,
+                lastModified: stat.mtime,
+                metadata,
+            };
+        }
+        catch (error) {
+            console.warn(`Failed to get file metadata for ${filePath}:`, error);
+            return null;
+        }
+    }
+    /**
+     * Clear cache (alias of invalidate() with no argument).
+     */
+    clearCache() {
+        this.invalidate();
+    }
+}
+//# sourceMappingURL=workspaceScanner.js.map

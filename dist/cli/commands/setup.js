@@ -1,0 +1,332 @@
+/**
+ * `d365fo-mcp setup` — first-time setup wizard.
+ *
+ * Walks through the deployment scenarios documented in docs/SETUP.md
+ * (A azure client · B hybrid · C local HTTP · D UDE · E local stdio ·
+ * F multi-instance), asks only the settings that scenario actually needs
+ * (each with its description, from src/config/settings.ts), and writes the
+ * answers to config/d365fo-mcp.json — the user never edits .env by hand.
+ * Secrets go to config/secrets.json; an existing .env is imported first so a
+ * returning user is not asked for what they already configured.
+ */
+import * as fs from 'node:fs';
+import { relative, resolve } from 'node:path';
+import { DOTNET_MISSING, dataRoot, installMode, isWindows, paths, repoRoot, setDataRoot } from '../context.js';
+import { settingByPath, settingsInSection } from '../../config/settings.js';
+import { commandExists, runExe, runShell } from '../exec.js';
+import { pinBridgeExe } from '../bridgePath.js';
+import { maybePrepareCopilotInstructions } from '../copilotFiles.js';
+import { mcpJsonNote, placementNote, stdioServer } from '../mcpJson.js';
+import { checkRelease } from '../npmRegistry.js';
+import { askAdvanced, askSecrets, askSetting, askSettings } from '../settingsPrompt.js';
+import { migrateLegacyEnv, openStore, readSetting, saveStore, writeSetting } from '../settingsStore.js';
+import { findPackagesRoot } from '../../utils/packagesRoot.js';
+import { rootTarget } from '../target.js';
+import { askConfirm, askSelect, askText, p, requireFullInstall } from '../ui.js';
+import { listXppConfigs } from '../xppConfig.js';
+import { rebuildIndex } from './indexCmd.js';
+import { instanceAddCommand } from './instance.js';
+const setting = (path) => {
+    const found = settingByPath(path);
+    if (!found)
+        throw new Error(`Unknown setting: ${path}`); // registry typo — fail loudly at first use
+    return found;
+};
+/**
+ * Ask an npm install where to keep its configuration, index and instances.
+ *
+ * `npm install -g d365fo-mcp@latest` replaces the package directory, so none
+ * of that can live inside it. Asking also puts the choice of *drive* in the
+ * user's hands, which matters more than it looks: a full index is upwards of
+ * 2 GB, and the default under %LOCALAPPDATA% is on C: — routinely the smallest
+ * disk on a D365FO VM.
+ *
+ * A checkout skips this entirely; it is its own data directory.
+ */
+async function configureDataRoot() {
+    if (installMode === 'git')
+        return;
+    const current = dataRoot();
+    const configured = fs.existsSync(paths.rootConfig);
+    if (configured && !await askConfirm(`Installation directory is ${current} — move it?`, false)) {
+        return;
+    }
+    const chosen = await askText({
+        message: 'Where should the configuration and the metadata index live?',
+        placeholder: current,
+        initialValue: current,
+        required: true,
+    });
+    if (resolve(chosen) === current) {
+        setDataRoot(current); // records the pointer even when the default was kept
+        return;
+    }
+    if (configured) {
+        p.log.warn(`The existing configuration stays in ${current}.\n` +
+            '   Copy config\\ and data\\ across by hand if you want to keep the index; ' +
+            'otherwise it will be rebuilt from scratch.');
+    }
+    setDataRoot(chosen);
+    p.log.success(`Installation directory: ${dataRoot()}`);
+}
+/** npm install + npm run build, skipping steps that are already done. */
+async function ensureInstalledAndBuilt() {
+    // An npm install arrives with its dependencies resolved and dist/ prebuilt,
+    // and has no sources to compile — there is nothing here for it to do.
+    if (installMode === 'npm') {
+        p.log.success('Installed from npm — dependencies and build are already in place.');
+        return true;
+    }
+    if (!fs.existsSync(resolve(repoRoot, 'node_modules'))) {
+        p.log.step('Installing dependencies (npm install)…');
+        if (await runShell('npm install') !== 0) {
+            p.log.error('npm install failed.');
+            return false;
+        }
+    }
+    else {
+        p.log.success('Dependencies already installed.');
+    }
+    if (!fs.existsSync(paths.distEntry) || await askConfirm('dist/ already exists — rebuild TypeScript anyway?', false)) {
+        p.log.step('Building TypeScript (npm run build)…');
+        if (await runShell('npm run build') !== 0) {
+            p.log.error('Build failed.');
+            return false;
+        }
+    }
+    return true;
+}
+/** Build the C# bridge — the only write path; Windows D365FO VMs only. */
+async function maybeBuildBridge(scenario) {
+    if (!isWindows) {
+        p.log.info('C# bridge skipped — it only builds on Windows D365FO VMs (writes stay unavailable here).');
+        return true;
+    }
+    if (fs.existsSync(paths.bridgeExe)) {
+        if (!await askConfirm('C# bridge already built — rebuild it?', false)) {
+            return true;
+        }
+        // user confirmed rebuild — skip the second confirmation
+    }
+    else if (!await askConfirm('Build the C# bridge? (required for creating/modifying files)')) {
+        p.log.warn('Skipped — the server will run read-only until you build it.');
+        return true;
+    }
+    if (!await commandExists('dotnet')) {
+        p.log.warn(DOTNET_MISSING);
+        return true; // read-only is a working state; refusing the whole wizard is not
+    }
+    const args = ['build', '-c', 'Release'];
+    // An npm install builds outside the package so the binary survives an
+    // update; a checkout keeps MSBuild's default so nothing about it changes.
+    if (paths.bridgeOutDir)
+        args.push('-o', paths.bridgeOutDir);
+    if (scenario === 'ude') {
+        const binPath = await askText({
+            message: 'UDE: path to the FrameworkDirectory\\bin folder (Enter to let MSBuild auto-detect)',
+            placeholder: 'C:\\Users\\...\\PackagesLocalDirectory\\bin',
+        });
+        if (binPath)
+            args.push(`-p:D365BinPath=${binPath}`);
+    }
+    p.log.step('Building C# bridge (dotnet build -c Release)…');
+    if (await runExe('dotnet', args, { cwd: paths.bridgeDir }) !== 0) {
+        // Not the .NET Framework 4.8 Dev Pack: the project references
+        // Microsoft.NETFramework.ReferenceAssemblies.net48, which supplies the
+        // reference assemblies from NuGet precisely so the targeting pack does not
+        // have to be installed. What a build needs is the SDK (checked above),
+        // a reachable NuGet feed, and the D365FO assemblies it compiles against.
+        p.log.error('Bridge build failed. Usual causes: no route to nuget.org for the restore, ' +
+            'or no D365FO bin directory to compile against (docs/SETUP.md).');
+        return false;
+    }
+    p.log.success('C# bridge built.');
+    return true;
+}
+/** Open the root store and fold an existing .env into it. */
+function openRootStore() {
+    const store = openStore(dataRoot(), paths.rootEnv);
+    const migrated = migrateLegacyEnv(store);
+    if (migrated.length > 0) {
+        p.log.success(`Imported ${migrated.length} setting(s) from the existing .env: ${migrated.map(s => s.env).join(', ')}\n` +
+            '   .env is left in place and still read as a fallback — the JSON config now wins.');
+    }
+    return store;
+}
+/** D365FO environment: type, then the paths/models that type needs. */
+async function configureEnvironment(store, scenario) {
+    p.log.step('D365FO environment');
+    let envType;
+    if (scenario === 'ude') {
+        envType = 'ude';
+        writeSetting(store, setting('environment.type'), 'ude');
+    }
+    else {
+        // Preselect what this machine looks like: XPP config files are what
+        // distinguishes a UDE box from a classic AOSService VM.
+        envType = String(await askSetting(store, setting('environment.type'), {
+            initial: listXppConfigs().length > 0 ? 'ude' : 'traditional',
+        }));
+    }
+    if (envType === 'ude') {
+        // Pin an XPP config when any exist; otherwise the server auto-detects the
+        // newest one at runtime, which is the right behaviour on a single-env box.
+        const configs = listXppConfigs();
+        if (configs.length > 0) {
+            const s = setting('environment.xppConfigName');
+            const pick = await askSelect(`${s.label}\n  ${s.description}`, [
+                { value: '', label: '(auto — always use the newest)' },
+                ...configs.map((cfg, i) => ({
+                    value: cfg.fullName,
+                    label: `${cfg.name}  v${cfg.version}${i === 0 ? ' (newest)' : ''}`,
+                    hint: cfg.modelStoreFolder,
+                })),
+            ], String(readSetting(store, s) ?? ''));
+            writeSetting(store, s, pick || undefined);
+        }
+        else {
+            p.log.info('No XPP configs found — the server will auto-detect at runtime.');
+        }
+        return 'ude';
+    }
+    // Offer the AosService volume this machine actually has. Which drive that is
+    // differs per VM image (K:, C:, J:, …), and a wrong guess is what turns the
+    // rest of setup into "no namespaces found" (#769).
+    const detected = findPackagesRoot();
+    if (detected)
+        p.log.success(`Found PackagesLocalDirectory at ${detected}`);
+    await askSetting(store, setting('environment.packagePath'), { required: true, initial: detected ?? undefined });
+    await askSetting(store, setting('environment.customModels'), { required: true });
+    return 'traditional';
+}
+/** Model/paths the write tools target. Auto-detection covers what is left empty. */
+async function configureWorkspace(store, scenario) {
+    p.log.step('Workspace target');
+    await askSetting(store, setting('workspace.modelName'));
+    await askSetting(store, setting('workspace.path'), { required: scenario === 'hybrid' || scenario === 'ude' });
+    await askSetting(store, setting('workspace.solutionsPath'));
+}
+/** Where the user keeps the .sln folders — the copy target for the client files. */
+function solutionsPath(store) {
+    return String(readSetting(store, setting('workspace.solutionsPath')) ?? '');
+}
+async function configureNaming(store) {
+    p.log.step('Naming');
+    await askSettings(store, settingsInSection('naming', 'basic'));
+}
+async function configureIndex(store) {
+    p.log.step('Metadata index');
+    await askSetting(store, setting('index.extractMode'));
+    const includeLabels = await askSetting(store, setting('index.includeLabels'));
+    if (includeLabels)
+        await askSetting(store, setting('index.labelLanguages'));
+}
+async function maybeBuildIndex() {
+    if (!await askConfirm('Build the metadata index now? (custom: minutes, full: 1-2 h)')) {
+        p.log.warn('Skipped — run `d365fo-mcp index` before first use.');
+        return true;
+    }
+    return rebuildIndex(rootTarget());
+}
+function savedNote(store) {
+    const rel = relative(dataRoot(), store.configPath) || store.configPath;
+    const lines = [`Settings written to ${rel}`];
+    if (fs.existsSync(store.secretsPath)) {
+        lines.push(`Secrets written to ${relative(dataRoot(), store.secretsPath)} (git-ignored, owner-only)`);
+    }
+    lines.push('', 'Edit it by re-running `d365fo-mcp setup` or by hand — it is plain JSON.');
+    p.note(lines.join('\n'), 'Configuration');
+}
+export async function setupCommand() {
+    p.intro('d365fo-mcp setup — first-time setup');
+    if (!requireFullInstall())
+        return;
+    // Setting up an already-stale copy wastes the longest step there is: the
+    // index build. Say so before it starts, but never block on it — plenty of
+    // D365FO VMs have no route to the registry.
+    const release = await checkRelease();
+    if (release.behind) {
+        p.log.warn(`This is d365fo-mcp ${release.current}; ${release.latest} is published.\n` +
+            `   Updating first avoids rebuilding the index twice: ${installMode === 'npm' ? 'npm install -g d365fo-mcp@latest' : 'd365fo-mcp update'}`);
+    }
+    const scenario = await askSelect('How will this machine use MCP? (docs/SETUP.md)', [
+        { value: 'local-stdio', label: 'E — Local stdio ★', hint: 'Single developer VM. Visual Studio launches MCP.' },
+        { value: 'hybrid', label: 'B — Hybrid ★', hint: 'Azure serves search. Local companion handles writes.' },
+        { value: 'local-http', label: 'C — Local HTTP', hint: 'Multiple local clients share one MCP HTTP port.' },
+        { value: 'ude', label: 'D — UDE', hint: 'Unified Developer Experience setup.' },
+        { value: 'multi', label: 'F — Multi-instance', hint: 'One machine, multiple isolated D365FO instances.' },
+    ]);
+    // Before anything is written: every path below hangs off the data directory.
+    await configureDataRoot();
+    // All scenarios need the local clone installed and built
+    if (!await ensureInstalledAndBuilt()) {
+        process.exitCode = 1;
+        return;
+    }
+    if (!await maybeBuildBridge(scenario)) {
+        process.exitCode = 1;
+        return;
+    }
+    if (scenario === 'multi') {
+        p.log.info('Each D365FO client gets its own instance (own config, database and port).');
+        await instanceAddCommand(undefined, undefined);
+        return;
+    }
+    const store = openRootStore();
+    // Before either branch saves: the server cannot find a bridge built outside
+    // the package unless the config says where it is.
+    pinBridgeExe(store);
+    if (scenario === 'hybrid') {
+        // The Azure half is configured through App Service settings; this wizard
+        // only sets up the local write-only companion.
+        writeSetting(store, setting('server.mode'), 'write-only');
+        const url = await askText({ message: 'Azure server URL', placeholder: 'https://your-server.azurewebsites.net/mcp/', required: true });
+        await configureEnvironment(store, scenario);
+        await configureWorkspace(store, scenario);
+        await maybePrepareCopilotInstructions(solutionsPath(store));
+        await configureNaming(store);
+        await askSecrets(store, ['behavior']);
+        await askAdvanced(store, ['environment', 'workspace', 'naming', 'bridge', 'behavior', 'server']);
+        saveStore(store);
+        savedNote(store);
+        mcpJsonNote({
+            'd365fo-azure': { url },
+            'd365fo-local': stdioServer(store),
+        });
+        placementNote();
+        p.outro('Hybrid setup complete — no local index needed (Azure serves the search).');
+        return;
+    }
+    // C / D / E: local index setups
+    writeSetting(store, setting('server.mode'), 'full');
+    await configureEnvironment(store, scenario);
+    await configureWorkspace(store, scenario);
+    await maybePrepareCopilotInstructions(solutionsPath(store));
+    await configureNaming(store);
+    await configureIndex(store);
+    let port = Number(readSetting(store, setting('server.port')) ?? 8080);
+    if (scenario === 'local-http') {
+        port = Number(await askSetting(store, setting('server.port'), { required: true }) ?? port);
+        await askSecrets(store, ['server']);
+    }
+    const advancedSections = ['environment', 'workspace', 'naming', 'index', 'server', 'bridge', 'behavior'];
+    await askAdvanced(store, advancedSections);
+    saveStore(store);
+    savedNote(store);
+    if (!await maybeBuildIndex()) {
+        process.exitCode = 1;
+        return;
+    }
+    if (scenario === 'local-http') {
+        mcpJsonNote({ 'd365fo-mcp-tools': { url: `http://localhost:${port}/mcp/` } });
+        placementNote();
+        p.outro('Done. Start the server with: d365fo-mcp start');
+        return;
+    }
+    // D / E — the IDE spawns dist/index.js itself and is pointed at the config
+    // file; every other setting comes from there.
+    mcpJsonNote({ 'd365fo-mcp-tools': stdioServer(store) });
+    placementNote();
+    p.outro('Done. VS spawns the server automatically — no manual start needed.');
+}
+//# sourceMappingURL=setup.js.map

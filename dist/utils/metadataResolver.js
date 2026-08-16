@@ -1,0 +1,237 @@
+/**
+ * Metadata Resolver
+ *
+ * Resolves D365FO object metadata from the local extracted-metadata/ folder.
+ * The SQLite DB stores file_path values that point to the Azure DevOps build-agent
+ * (e.g. C:\home\vsts\work\1\...) which is never accessible at runtime.
+ * Instead, this module reads the pre-extracted JSON/XML from extracted-metadata/.
+ *
+ * Folder layout:
+ *   extracted-metadata/{ModelName}/classes/{ClassName}.json   → { name, model, methods[], ... }
+ *   extracted-metadata/{ModelName}/enums/{EnumName}.json      → { raw: "<xml>..." }
+ *   extracted-metadata/{ModelName}/tables/{TableName}.json    → { name, model, fields[], ... }
+ */
+import { promises as fs } from 'fs';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
+import { getConfigManager, fallbackPackagePath } from './configManager.js';
+// Resolve path relative to this file, not to process.cwd().
+// METADATA_PATH env var allows multi-instance setups to point at different folders.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// METADATA_PATH env var lets each server instance point at its own extracted-metadata folder.
+const EXTRACTED_METADATA_BASE = process.env.METADATA_PATH
+    ? path.resolve(process.env.METADATA_PATH)
+    : path.resolve(__dirname, '../../extracted-metadata');
+// Legacy fallback (not overridden by METADATA_PATH): some DB file_path values point into metadata/.
+const METADATA_BASE = path.resolve(__dirname, '../../metadata');
+/**
+ * Build the absolute path to an extracted-metadata JSON file.
+ * Returns null if the file doesn't exist (no throw).
+ */
+async function resolveMetadataJsonPath(model, objectType, name) {
+    const filePath = path.join(EXTRACTED_METADATA_BASE, model, objectType, `${name}.json`);
+    try {
+        await fs.access(filePath);
+        return filePath;
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Read the raw XML string from an extracted-metadata enum JSON file.
+ * Returns null if not available.
+ */
+export async function readEnumRawXml(model, enumName) {
+    // Try extracted-metadata/ first, then metadata/ (DB file_path may point here)
+    for (const base of [EXTRACTED_METADATA_BASE, METADATA_BASE]) {
+        const filePath = path.join(base, model, 'enums', `${enumName}.json`);
+        try {
+            await fs.access(filePath);
+            const raw = await fs.readFile(filePath, 'utf-8');
+            const data = JSON.parse(raw);
+            return typeof data.raw === 'string' ? data.raw : null;
+        }
+        catch {
+            continue;
+        }
+    }
+    return null;
+}
+/**
+ * Read the raw XML string from an extracted-metadata EDT JSON file.
+ * Returns null if not available.
+ */
+export async function readEdtRawXml(model, edtName) {
+    // Try extracted-metadata/ first, then metadata/ (DB file_path may point here)
+    for (const base of [EXTRACTED_METADATA_BASE, METADATA_BASE]) {
+        const filePath = path.join(base, model, 'edts', `${edtName}.json`);
+        try {
+            await fs.access(filePath);
+            const raw = await fs.readFile(filePath, 'utf-8');
+            const data = JSON.parse(raw);
+            return typeof data.raw === 'string' ? data.raw : null;
+        }
+        catch {
+            continue;
+        }
+    }
+    return null;
+}
+export async function readViewMetadata(model, viewName) {
+    const filePath = await resolveMetadataJsonPath(model, 'views', viewName);
+    if (!filePath)
+        return null;
+    try {
+        const raw = await fs.readFile(filePath, 'utf-8');
+        return JSON.parse(raw);
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Attempt to remap a build-agent file path to the locally configured packages path.
+ *
+ * The SQLite index stores paths from the Azure DevOps CI build agent, e.g.:
+ *   Linux:   /home/vsts/work/1/PackagesLocalDirectory/applicationsuite/Foundation/AxForm/CustTable.xml
+ *   Windows: C:\home\vsts\work\1\PackagesLocalDirectory\applicationsuite\Foundation\AxForm\CustTable.xml
+ *
+ * This extracts the relative part after "PackagesLocalDirectory" and joins it with
+ * the locally configured packagePath, so tools can read the XML from a local D365FO
+ * installation even though the DB path itself points to a non-existent CI machine.
+ *
+ * Returns null when the path cannot be remapped or the remapped file does not exist.
+ */
+export async function resolveDbPathLocally(dbFilePath) {
+    // Normalise separators so the regex matches both Linux and Windows DB paths
+    const normalised = dbFilePath.replace(/\\/g, '/');
+    const match = normalised.match(/PackagesLocalDirectory\/(.+)$/i);
+    if (!match)
+        return null;
+    const relativePart = match[1]; // e.g. "applicationsuite/Foundation/AxForm/CustTable.xml"
+    const configManager = getConfigManager();
+    await configManager.ensureLoaded();
+    const localPackagePath = configManager.getPackagePath() || fallbackPackagePath();
+    // Convert forward slashes back to the OS separator
+    const localPath = path.join(localPackagePath, ...relativePart.split('/'));
+    try {
+        await fs.access(localPath);
+        return localPath;
+    }
+    catch {
+        return null; // File does not exist locally
+    }
+}
+/**
+ * Query the symbol index DB to find what top-level types a given name exists as.
+ * Ignores 'method' and 'field' rows — those are children, not top-level objects.
+ *
+ * @param db - SQLite Database instance (symbolIndex.db)
+ * @param name - the object name to look up
+ */
+export function detectObjectTypeInDb(db, name) {
+    try {
+        const stmt = db.prepare(`
+      SELECT DISTINCT type, model
+      FROM symbols
+      WHERE name = ?
+        AND type NOT IN ('method', 'field')
+      ORDER BY type
+      LIMIT 10
+    `);
+        return stmt.all(name);
+    }
+    catch {
+        return [];
+    }
+}
+/**
+ * Build a Markdown warning section when an object was looked up as one type
+ * (e.g. 'class') but actually exists in the DB as a different type (form, table …).
+ *
+ * Returns an empty string when no mismatch is detected.
+ *
+ * @param db           - SQLite Database instance
+ * @param name         - the object name that was not found
+ * @param expectedType - the type that was searched for (default: 'class')
+ */
+export function buildObjectTypeMismatchMessage(db, name, expectedType = 'class') {
+    const existingTypes = detectObjectTypeInDb(db, name);
+    if (existingTypes.length === 0)
+        return '';
+    const expectedEntries = existingTypes.filter(t => t.type === expectedType);
+    const otherEntries = existingTypes.filter(t => t.type !== expectedType);
+    // Only emit a warning when the object does NOT exist as the expected type
+    if (expectedEntries.length > 0 || otherEntries.length === 0)
+        return '';
+    let section = `\n\n⚠️ **Type Mismatch:** \`${name}\` is not a **${expectedType}** — it exists in the index as:\n\n`;
+    for (const entry of otherEntries) {
+        section += `- **${entry.type}** (model: ${entry.model})\n`;
+    }
+    const uniqueTypes = [...new Map(otherEntries.map(e => [e.type, e])).values()];
+    section += `\n💡 **Use the correct tool instead:**\n`;
+    for (const entry of uniqueTypes) {
+        switch (entry.type) {
+            case 'form':
+                section += `- \`get_object_info(objectType="form", name="${name}")\` — inspect form datasources, controls, and methods\n`;
+                break;
+            case 'table':
+                section += `- \`get_object_info(objectType="table", name="${name}")\` — inspect table fields and methods\n`;
+                break;
+            case 'view':
+                section += `- \`get_object_info(objectType="view", name="${name}")\` — inspect view fields and methods\n`;
+                break;
+            case 'query':
+                section += `- \`get_object_info(objectType="query", name="${name}")\` — inspect query datasources\n`;
+                break;
+            case 'enum':
+                section += `- \`get_object_info(objectType="enum", name="${name}")\` — inspect enum values\n`;
+                break;
+        }
+    }
+    return section;
+}
+/**
+ * Heuristic: does a reader result's text indicate an object-resolution ("not found")
+ * failure, as opposed to a genuine operation error (parse failure, timeout, etc.)?
+ * Used to decide whether to append the not-found guidance below.
+ */
+export function isNotFoundResultText(text) {
+    if (!text)
+        return false;
+    return /\bnot found\b|could not resolve|does not exist/i.test(text);
+}
+/**
+ * Actionable guidance appended to a reader's "object not found" result.
+ *
+ * Steers the agent to the right MCP tools (search / update_symbol_index) and away
+ * from filesystem scanning (Get-ChildItem / Select-String / dir / ls / find), which
+ * is slow across 350+ model folders and can hang the VS 2022 MCP integration.
+ */
+export function buildNotFoundGuidance(name, objectType) {
+    return (`\n\n---\n` +
+        `🔎 **Resolve \`${name}\` (${objectType}) with the right tool — do not guess or grep the disk:**\n` +
+        `1. \`search\` for \`${name}\` — pass \`queries[]\` to probe several spellings in ONE call; the exact name may differ (model prefix, casing, suffix).\n` +
+        `2. Real object in a custom package that isn't indexed yet? Run ` +
+        `\`update_symbol_index({ filePath: "<absolute path to ${name}.xml>" })\`, and confirm ` +
+        `\`D365FO_CUSTOM_PACKAGES_PATH\` includes that package so the bridge + symbol index can see it.\n` +
+        `3. Just created it this session? The bridge may not have it yet — pass the file path, or it will be picked up after a refresh.\n\n` +
+        `⛔ Do NOT scan the filesystem (Get-ChildItem / Select-String / dir / ls / find) to locate D365FO objects — ` +
+        `it is slow, can hang the VS 2022 MCP integration, and bypasses metadata resolution. Use the tools above.`);
+}
+/**
+ * Build a friendly error explaining that the XML for this object type
+ * is not available in the current deployment (no D365FO installation).
+ */
+export function buildXmlNotAvailableMessage(objectType, objectName, dbFilePath) {
+    return (`❌ Cannot read ${objectType} metadata for "${objectName}".\n\n` +
+        `The metadata database was built on an Azure DevOps build agent and stores file paths\n` +
+        `that are not accessible in the current environment:\n` +
+        `  ${dbFilePath}\n\n` +
+        `To use this tool you need either:\n` +
+        `1. Run the MCP server locally on a D365FO Windows VM where that path exists, OR\n` +
+        `2. Ensure the ${objectType} XML files are accessible at the path above.\n\n` +
+        `Note: ${objectType}s are not included in the pre-extracted JSON metadata in older builds. Current extraction supports classes, tables, enums, EDTs, and views.`);
+}
+//# sourceMappingURL=metadataResolver.js.map

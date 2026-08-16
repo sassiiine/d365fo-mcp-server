@@ -1,0 +1,21 @@
+/**
+ * Bridge module — C# D365MetadataBridge integration.
+ *
+ * Provides access to Microsoft's official Dev Tools API (IMetadataProvider)
+ * and cross-reference database (DYNAMICSXREFDB) via a child process.
+ *
+ * Usage:
+ *   import { BridgeClient, createBridgeClient } from './bridge/index.js';
+ *
+ *   // In server startup:
+ *   const bridge = await createBridgeClient({ packagesPath: 'K:\\AosService\\PackagesLocalDirectory' });
+ *   if (bridge) {
+ *     const table = await bridge.readTable('CustTable');
+ *     const refs = await bridge.findReferences('CustTable');
+ *   }
+ */
+export { BridgeClient, createBridgeClient } from './bridgeClient.js';
+export * from './bridgeTypes.js';
+export { isBridgeFailure, describeBridgeFailure, renderBridgeFailureNote, recordBridgeFailure, runWithBridgeFailureScope, BRIDGE_FAILURE_MARKER, } from './bridgeFailure.js';
+export { tryBridgeTable, tryBridgeClass, tryBridgeMethodSource, tryBridgeEnum, tryBridgeEdt, tryBridgeForm, tryBridgeReferences, tryBridgeSearch, tryBridgeQuery, tryBridgeView, tryBridgeDataEntity, tryBridgeReport, bridgeRefreshProvider, bridgeValidateAfterWrite, bridgeResolveObject, canBridgeCreate, canBridgeModify, bridgeCreateObject, bridgeCreateSmartTable, bridgeAddMethod, bridgeRemoveMethod, bridgeAddField, bridgeModifyField, bridgeRenameField, bridgeRemoveField, bridgeReplaceAllFields, bridgeAddIndex, bridgeAddFullTextIndex, bridgeRemoveFullTextIndex, bridgeAddTableMapping, bridgeRemoveTableMapping, bridgeRemoveIndex, bridgeAddRelation, bridgeRemoveRelation, bridgeAddFieldGroup, bridgeRemoveFieldGroup, bridgeAddFieldToFieldGroup, bridgeAddEnumValue, bridgeModifyEnumValue, bridgeRemoveEnumValue, bridgeAddControl, bridgeAddDataSource, bridgeSetProperty, bridgeReplaceCode, bridgeAddFieldModification, bridgeAddMenuItemToMenu, bridgeBatchModify, bridgeGetCapabilities, bridgeDiscoverFormPatterns, tryBridgeSecurityArtifact, tryBridgeMenuItem, tryBridgeTableExtensions, tryBridgeCompletion, tryBridgeCocExtensions, tryBridgeEventHandlers, tryBridgeApiUsageCallers, } from './bridgeAdapter.js';
+//# sourceMappingURL=index.js.map

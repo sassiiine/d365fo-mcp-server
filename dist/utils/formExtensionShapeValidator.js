@@ -1,0 +1,114 @@
+/**
+ * Form-extension control-shape validator.
+ *
+ * Catches malformed AxFormExtension control shapes in hand-written `xmlContent`
+ * (the escape hatch when add-control can't be used) that would otherwise be
+ * silently accepted and then rejected by the D365FO deserializer.
+ *
+ * Correct shape (verified against shipped standard extensions, e.g.
+ * InventItemSampling.AdvancedQualityManagement):
+ *
+ *   <AxFormExtensionControl xmlns="">
+ *     <Name>FormExtensionControl{rand}</Name>
+ *     <FormControl xmlns="" i:type="AxFormIntegerControl">
+ *       <Name>Field</Name>
+ *       <Type>Integer</Type>
+ *       <FormControlExtension i:nil="true" />
+ *       <DataField>Field</DataField>
+ *       <DataSource>Table</DataSource>
+ *       <Label>@Model:Label</Label>
+ *     </FormControl>
+ *     <Parent>ParentControl</Parent>
+ *   </AxFormExtensionControl>
+ */
+import { findFormExtensionPlacementProblems } from './formExtensionControlXml.js';
+/**
+ * The canonical correct shape, shown to the caller when a problem is found so they
+ * can fix it without grepping standard packages.
+ */
+const CORRECT_FORM_EXTENSION_CONTROL_TEMPLATE = `<AxFormExtensionControl xmlns="">\n` +
+    `    <Name>FormExtensionControl{uniqueId}</Name>\n` +
+    `    <FormControl xmlns="" i:type="AxFormIntegerControl">\n` +
+    `        <Name>FieldName</Name>\n` +
+    `        <Type>Integer</Type>\n` +
+    `        <FormControlExtension i:nil="true" />\n` +
+    `        <DataField>FieldName</DataField>\n` +
+    `        <DataSource>TableName</DataSource>\n` +
+    `        <Label>@Model:LabelId</Label>\n` +
+    `    </FormControl>\n` +
+    `    <Parent>ParentControlName</Parent>\n` +
+    `</AxFormExtensionControl>`;
+/**
+ * Inspect form-extension XML for the known malformed control shapes. Returns an empty
+ * array when the shape is fine. Pure + side-effect-free so it is trivially testable.
+ */
+export function validateFormExtensionControlShape(xml) {
+    const problems = [];
+    // Wrong wrapper element for a newly-added control.
+    if (/<AxFormControlExtension\b/.test(xml)) {
+        problems.push({
+            found: '<AxFormControlExtension>',
+            expected: '<AxFormExtensionControl xmlns="">',
+            detail: 'A new control added by a form extension is wrapped in <AxFormExtensionControl xmlns="">, ' +
+                'not <AxFormControlExtension>.',
+        });
+    }
+    // Wrong parent-reference element.
+    if (/<ParentControlName\b/.test(xml)) {
+        problems.push({
+            found: '<ParentControlName>',
+            expected: '<Parent>',
+            detail: 'The parent control is referenced with <Parent>Name</Parent>, not <ParentControlName>.',
+        });
+    }
+    // <FormControlExtension> used as the control container (wrong) — the legitimate use
+    // is the self-closing <FormControlExtension i:nil="true" /> inside a <FormControl>,
+    // which this pattern deliberately does not match.
+    if (/<FormControlExtension\s*>[\s\S]*?<AxForm\w*Control\b/.test(xml)) {
+        problems.push({
+            found: '<FormControlExtension><AxForm…Control>',
+            expected: '<FormControl xmlns="" i:type="AxForm…Control">',
+            detail: 'The control itself goes in <FormControl xmlns="" i:type="AxForm…Control">…</FormControl>. ' +
+                '<FormControlExtension i:nil="true" /> is a separate, self-closing element INSIDE that FormControl.',
+        });
+    }
+    // Non-existent integer control element.
+    if (/\bAxFormIntControl\b/.test(xml)) {
+        problems.push({
+            found: 'AxFormIntControl',
+            expected: 'AxFormIntegerControl',
+            detail: 'The integer form control class is AxFormIntegerControl (with <Type>Integer</Type>). ' +
+                'AxFormIntControl does not exist and fails deserialization.',
+        });
+    }
+    // Right element names, wrong collection. Every check above is a spelling check,
+    // and a control can be spelled perfectly and still sit somewhere the
+    // deserializer will not read it — most commonly an <AxFormExtensionControl>
+    // envelope dropped into a nested <Controls>. Unlike the problems above, that one
+    // does NOT fail deserialization loudly: the node is discarded, the build reports
+    // 0 errors, and the control is simply absent from the form. Nothing later in the
+    // pipeline will report it, so it has to be caught here.
+    for (const p of findFormExtensionPlacementProblems(xml)) {
+        problems.push({
+            found: `<${p.element}> at line ${p.line}`,
+            expected: 'the collection typed to hold it',
+            detail: p.detail,
+        });
+    }
+    return problems;
+}
+/**
+ * Render a blocking error message for the detected problems, including the correct
+ * template so the caller can fix the XML in a single edit (no package grepping).
+ */
+export function buildFormExtensionShapeError(objectName, problems) {
+    const rows = problems
+        .map(p => `  • \`${p.found}\` → must be \`${p.expected}\`\n    ${p.detail}`)
+        .join('\n');
+    return (`⛔ form-extension "${objectName}" — the control XML uses a shape the D365FO deserializer rejects.\n\n` +
+        `Problems found:\n${rows}\n\n` +
+        `Correct shape for a bound control added to an existing parent:\n\`\`\`xml\n${CORRECT_FORM_EXTENSION_CONTROL_TEMPLATE}\n\`\`\`\n\n` +
+        `Tip: prefer d365fo_file(action="modify", operation="add-control", objectType="form-extension", …) — ` +
+        `it now emits this exact shape for you, so you rarely need to hand-write the XML.`);
+}
+//# sourceMappingURL=formExtensionShapeValidator.js.map

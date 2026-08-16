@@ -1,0 +1,180 @@
+/**
+ * Security Artifact Info Tool
+ * Retrieve full details for security privileges, duties, and roles including hierarchy chains
+ */
+import { z } from 'zod';
+import { tryBridgeSecurityArtifact } from '../bridge/index.js';
+const SecurityArtifactInfoArgsSchema = z.object({
+    name: z.string().describe('Name of the security privilege, duty, or role'),
+    artifactType: z.enum(['privilege', 'duty', 'role']).describe('Type of security artifact'),
+    includeChain: z.boolean().optional().default(true).describe('Walk the full hierarchy (role→duties→privileges→entry points)'),
+});
+export async function securityArtifactInfoTool(request, context) {
+    try {
+        const args = SecurityArtifactInfoArgsSchema.parse(request.params.arguments);
+        // ── Bridge fast-path (C# IMetadataProvider) ──
+        const bridgeResult = await tryBridgeSecurityArtifact(context.bridge, args.name, args.artifactType, args.includeChain ?? true);
+        if (bridgeResult)
+            return bridgeResult;
+        // ── Fallback: SQLite index ──
+        const rdb = context.symbolIndex.getReadDb();
+        if (args.artifactType === 'privilege') {
+            return getPrivilegeInfo(rdb, args.name, args.includeChain ?? true);
+        }
+        else if (args.artifactType === 'duty') {
+            return getDutyInfo(rdb, args.name, args.includeChain ?? true);
+        }
+        else {
+            return getRoleInfo(rdb, args.name, args.includeChain ?? true);
+        }
+    }
+    catch (error) {
+        return {
+            content: [
+                {
+                    type: 'text',
+                    text: `Error getting security artifact info: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                },
+            ],
+            isError: true,
+        };
+    }
+}
+function getPrivilegeInfo(db, name, _includeChain) {
+    // Get the privilege symbol
+    const symbol = db.prepare(`SELECT name, description, signature, model, file_path FROM symbols WHERE name = ? AND type = 'security-privilege' LIMIT 1`).get(name);
+    if (!symbol) {
+        return {
+            content: [{ type: 'text', text: `Security privilege not found: ${name}\n\nTip: Run extract-metadata and build-database to index security objects.` }],
+            isError: true,
+        };
+    }
+    // Get entry points
+    const entryPoints = db.prepare(`SELECT entry_point_name, object_type, access_level FROM security_privilege_entries WHERE privilege_name = ? ORDER BY entry_point_name`).all(name);
+    // Find which duties use this privilege
+    const duties = db.prepare(`SELECT DISTINCT duty_name FROM security_duty_privileges WHERE privilege_name = ? ORDER BY duty_name`).all(name);
+    let output = `SecurityPrivilege: ${symbol.name}\n`;
+    if (symbol.description)
+        output += `Label: ${symbol.description}\n`;
+    output += `Model: ${symbol.model}\n`;
+    if (entryPoints.length > 0) {
+        output += `\nEntry Points (${entryPoints.length}):\n`;
+        for (const ep of entryPoints) {
+            output += `  ✓ ${ep.entry_point_name} [${ep.object_type}]  → ${ep.access_level} access\n`;
+        }
+    }
+    else {
+        output += `\nEntry Points: none indexed\n`;
+    }
+    if (duties.length > 0) {
+        output += `\nUsed in Duties (${duties.length}):\n`;
+        output += `  ${duties.map((d) => d.duty_name).join(', ')}\n`;
+    }
+    return { content: [{ type: 'text', text: output }] };
+}
+function getDutyInfo(db, name, includeChain) {
+    const symbol = db.prepare(`SELECT name, description, signature, model FROM symbols WHERE name = ? AND type = 'security-duty' LIMIT 1`).get(name);
+    if (!symbol) {
+        return {
+            content: [{ type: 'text', text: `Security duty not found: ${name}` }],
+            isError: true,
+        };
+    }
+    const privileges = db.prepare(`SELECT privilege_name FROM security_duty_privileges WHERE duty_name = ? ORDER BY privilege_name`).all(name);
+    const roles = db.prepare(`SELECT DISTINCT role_name FROM security_role_duties WHERE duty_name = ? ORDER BY role_name`).all(name);
+    let output = `SecurityDuty: ${symbol.name}\n`;
+    if (symbol.description)
+        output += `Label: ${symbol.description}\n`;
+    output += `Model: ${symbol.model}\n`;
+    if (privileges.length > 0) {
+        output += `\nPrivileges (${privileges.length}):\n`;
+        if (includeChain) {
+            // A4: Batched query — fetch ALL entry points for all privileges in one query
+            const privNames = privileges.map((p) => p.privilege_name);
+            const ph = privNames.map(() => '?').join(',');
+            const allEps = db.prepare(`SELECT privilege_name, entry_point_name, object_type, access_level
+         FROM security_privilege_entries WHERE privilege_name IN (${ph})
+         ORDER BY privilege_name, entry_point_name`).all(...privNames);
+            const epsByPriv = new Map();
+            for (const ep of allEps) {
+                if (!epsByPriv.has(ep.privilege_name))
+                    epsByPriv.set(ep.privilege_name, []);
+                epsByPriv.get(ep.privilege_name).push(ep);
+            }
+            for (const priv of privileges) {
+                const eps = epsByPriv.get(priv.privilege_name) || [];
+                output += `  • ${priv.privilege_name}`;
+                if (eps.length > 0) {
+                    output += ` (${eps.length} entry points: ${eps.slice(0, 3).map((ep) => `${ep.entry_point_name}[${ep.access_level}]`).join(', ')}${eps.length > 3 ? '...' : ''})`;
+                }
+                output += '\n';
+            }
+        }
+        else {
+            for (const priv of privileges) {
+                output += `  • ${priv.privilege_name}\n`;
+            }
+        }
+    }
+    if (roles.length > 0) {
+        output += `\nAssigned to Roles (${roles.length}):\n`;
+        output += `  ${roles.map((r) => r.role_name).join(', ')}\n`;
+    }
+    return { content: [{ type: 'text', text: output }] };
+}
+function getRoleInfo(db, name, includeChain) {
+    const symbol = db.prepare(`SELECT name, description, signature, model FROM symbols WHERE name = ? AND type = 'security-role' LIMIT 1`).get(name);
+    if (!symbol) {
+        return {
+            content: [{ type: 'text', text: `Security role not found: ${name}` }],
+            isError: true,
+        };
+    }
+    const duties = db.prepare(`SELECT duty_name FROM security_role_duties WHERE role_name = ? ORDER BY duty_name`).all(name);
+    let output = `SecurityRole: ${symbol.name}\n`;
+    if (symbol.description)
+        output += `Description: ${symbol.description}\n`;
+    output += `Model: ${symbol.model}\n`;
+    if (duties.length > 0) {
+        output += `\nDuties (${duties.length}):\n`;
+        if (includeChain) {
+            // A4: Batched query — fetch ALL privileges for all duties in one query
+            const dutyNames = duties.map((d) => d.duty_name);
+            const ph = dutyNames.map(() => '?').join(',');
+            const allPrivs = db.prepare(`SELECT duty_name, privilege_name FROM security_duty_privileges
+         WHERE duty_name IN (${ph}) ORDER BY duty_name, privilege_name`).all(...dutyNames);
+            const privsByDuty = new Map();
+            for (const p of allPrivs) {
+                if (!privsByDuty.has(p.duty_name))
+                    privsByDuty.set(p.duty_name, []);
+                privsByDuty.get(p.duty_name).push(p.privilege_name);
+            }
+            for (const duty of duties) {
+                const privs = privsByDuty.get(duty.duty_name) || [];
+                output += `  • ${duty.duty_name}`;
+                if (privs.length > 0) {
+                    output += ` → ${privs.length} privilege(s): ${privs.slice(0, 3).join(', ')}${privs.length > 3 ? '...' : ''}`;
+                }
+                output += '\n';
+            }
+            // Batched: count total entry points across all duties' privileges
+            const allPrivNames = [...new Set(allPrivs.map(p => p.privilege_name))];
+            if (allPrivNames.length > 0) {
+                const ph2 = allPrivNames.map(() => '?').join(',');
+                const epCount = db.prepare(`SELECT COUNT(*) as cnt FROM security_privilege_entries
+           WHERE privilege_name IN (${ph2})`).get(...allPrivNames)?.cnt ?? 0;
+                output += `\nTotal entry points covered: ${epCount}\n`;
+            }
+        }
+        else {
+            for (const duty of duties) {
+                output += `  • ${duty.duty_name}\n`;
+            }
+        }
+    }
+    else {
+        output += `\nDuties: none indexed\n`;
+    }
+    return { content: [{ type: 'text', text: output }] };
+}
+//# sourceMappingURL=securityArtifactInfo.js.map

@@ -1,0 +1,5208 @@
+// src/utils/loadEnv.ts
+import dotenv from "dotenv";
+import { existsSync as existsSync2, readFileSync as readFileSync2, statSync } from "fs";
+import { dirname as dirname2, isAbsolute as isAbsolute2, join as join2, resolve as resolve2 } from "path";
+import { fileURLToPath } from "url";
+
+// src/config/configFile.ts
+import * as fs from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+
+// src/config/settings.ts
+var SETTINGS = [
+  // ── environment ──────────────────────────────────────────────────────────
+  {
+    path: "environment.type",
+    env: "D365FO_DEV_ENVIRONMENT_TYPE",
+    section: "environment",
+    tier: "basic",
+    type: "enum",
+    label: "Development environment type",
+    description: 'Classic AOSService VM ("traditional") or Unified Developer Experience / Power Platform Tools ("ude"). The wizard preselects the one it detects \u2014 UDE when XPP config files exist in %LOCALAPPDATA%\\Microsoft\\Dynamics365\\XPPConfig. Left unset, the server falls back to that same detection.',
+    choices: [
+      { value: "traditional", hint: "classic AOSService VM with PackagesLocalDirectory" },
+      { value: "ude", hint: "Unified Developer Experience / Power Platform Tools" }
+    ]
+  },
+  {
+    path: "environment.packagePath",
+    env: "D365FO_PACKAGE_PATH",
+    section: "environment",
+    tier: "basic",
+    type: "path",
+    label: "Packages root (PackagesLocalDirectory)",
+    description: "AOT packages folder (PackagesLocalDirectory) used as the read-only source for indexing. Machine-wide on a traditional VM; UDE resolves it from the XPP config instead. Left empty, the server scans the machine's drives for AosService\\PackagesLocalDirectory \u2014 which volume that is depends on the VM image (K:, C:, J:, \u2026).",
+    placeholder: "C:\\AOSService\\PackagesLocalDirectory"
+  },
+  {
+    path: "environment.customModels",
+    env: "CUSTOM_MODELS",
+    section: "environment",
+    tier: "basic",
+    type: "list",
+    label: "Custom model names",
+    description: "Your own (non-Microsoft) models, comma-separated. They are indexed with priority and treated as writable. Find them in VS \u2192 Dynamics 365 \u2192 Model Management \u2192 View models. UDE detects these automatically.",
+    placeholder: "ContosoRobotics,ContosoBank"
+  },
+  {
+    path: "environment.xppConfigName",
+    env: "XPP_CONFIG_NAME",
+    section: "environment",
+    tier: "basic",
+    type: "string",
+    label: "XPP config to pin (UDE)",
+    description: "Name of a config file in %LOCALAPPDATA%\\Microsoft\\Dynamics365\\XPPConfig. Pinning one keeps the server on a specific environment/version; leave empty to always use the newest config."
+  },
+  {
+    path: "environment.customPackagesPath",
+    env: "D365FO_CUSTOM_PACKAGES_PATH",
+    section: "environment",
+    tier: "advanced",
+    type: "path",
+    label: "Custom X++ root (UDE ModelStoreFolder)",
+    description: "Where custom model XML is written and tracked by git. Normally read from the XPP config \u2014 override only when your working tree lives somewhere else."
+  },
+  {
+    path: "environment.microsoftPackagesPath",
+    env: "D365FO_MICROSOFT_PACKAGES_PATH",
+    section: "environment",
+    tier: "advanced",
+    type: "path",
+    label: "Microsoft X++ root (UDE FrameworkDirectory)",
+    description: "Read-only Microsoft packages folder. Normally read from the XPP config."
+  },
+  // ── workspace ────────────────────────────────────────────────────────────
+  {
+    path: "workspace.modelName",
+    env: "D365FO_MODEL_NAME",
+    section: "workspace",
+    tier: "basic",
+    type: "string",
+    label: "Target model for code generation",
+    description: "The model new objects are created in. Leave empty to let the server detect it from the IDE workspace or the .rnrproj file \u2014 set it explicitly when one server instance always serves one model."
+  },
+  {
+    path: "workspace.path",
+    env: "D365FO_WORKSPACE_PATH",
+    section: "workspace",
+    tier: "basic",
+    type: "path",
+    label: "Workspace path (\u2026\\PackagesLocalDirectory\\<Package>\\<Model>)",
+    description: "Two-level AOT path of the model being worked on. Used to resolve the package root and the write target when the IDE does not report a workspace.",
+    placeholder: "K:\\AosService\\PackagesLocalDirectory\\YourPackage\\YourModel"
+  },
+  {
+    path: "workspace.solutionsPath",
+    env: "D365FO_SOLUTIONS_PATH",
+    section: "workspace",
+    tier: "basic",
+    type: "path",
+    label: "Folder scanned for .rnrproj projects",
+    description: "Scanned once at startup so the server can switch model automatically when you open another solution or git branch. Optional, but it is what makes multi-project workspaces work without reconfiguring.",
+    placeholder: "K:\\repos\\MySolution\\projects"
+  },
+  {
+    path: "workspace.projectPath",
+    env: "D365FO_PROJECT_PATH",
+    section: "workspace",
+    tier: "advanced",
+    type: "path",
+    label: "Pinned .rnrproj file",
+    description: "Forces one specific project instead of auto-detection. Rarely needed outside CI."
+  },
+  {
+    path: "workspace.solutionPath",
+    env: "D365FO_SOLUTION_PATH",
+    section: "workspace",
+    tier: "advanced",
+    type: "path",
+    label: "Pinned .sln file",
+    description: "Forces one specific solution instead of auto-detection. Rarely needed outside CI."
+  },
+  {
+    env: "D365FO_CROSS_MODEL_WRITE_MODELS",
+    section: "workspace",
+    tier: "env-only",
+    type: "list",
+    label: "Models this workspace may also write into",
+    description: "Comma-separated models this workspace may write into besides its own. By default any create/modify/label write into another custom model is refused and the extension route in the active model is offered instead \u2014 see [Objects owned by another model](CUSTOM_EXTENSIONS.md#objects-owned-by-another-model). Consent lives here, in configuration, because a tool parameter is something the agent can grant itself. Re-read from `.env` before every decision, so an edit applies to the next attempt without a restart."
+  },
+  {
+    env: "D365FO_ALLOW_CROSS_MODEL_WRITE",
+    section: "workspace",
+    tier: "env-only",
+    type: "boolean",
+    label: "Allow writes into any other custom model",
+    description: "Set to `true` to allow writes into **any** other custom model \u2014 the blanket form of the setting above.",
+    default: false
+  },
+  // ── naming ───────────────────────────────────────────────────────────────
+  {
+    path: "naming.prefix",
+    env: "EXTENSION_PREFIX",
+    section: "naming",
+    tier: "basic",
+    type: "string",
+    label: "Extension prefix for custom objects",
+    description: "Your ISV/customer prefix. Prepended to every generated object, field and method name and enforced by the naming validator, so BP checks pass on the first build. Used as the **fallback**: when the active model's existing objects already show a prefix, that one wins \u2014 see [Where the prefix comes from](CUSTOM_EXTENSIONS.md#where-the-prefix-comes-from).",
+    placeholder: "ISV_",
+    required: true
+  },
+  {
+    path: "naming.prefixSource",
+    env: "EXTENSION_PREFIX_SOURCE",
+    section: "naming",
+    tier: "advanced",
+    type: "enum",
+    label: "Where the prefix comes from",
+    description: "Whether the effective prefix is learned from the active model's own objects or pinned to the configured `naming.prefix`. Pin it when one model carries several feature prefixes that share a stem \u2014 inference learns the shared stem, while the objects you write need the full one. See [Where the prefix comes from](CUSTOM_EXTENSIONS.md#where-the-prefix-comes-from).",
+    default: "model",
+    choices: [
+      { value: "model", hint: "the model's own objects decide, falling back to naming.prefix" },
+      { value: "config", hint: "always naming.prefix, inference off (pre-1.8.2 behaviour)" }
+    ]
+  },
+  {
+    path: "naming.suffix",
+    env: "EXTENSION_SUFFIX",
+    section: "naming",
+    tier: "advanced",
+    type: "string",
+    label: "Extension suffix",
+    description: 'Optional suffix appended to new object names (MyTableZZ with suffix "ZZ"). Most projects use only a prefix \u2014 leave empty unless your convention requires one.'
+  },
+  {
+    path: "naming.extensionStyle",
+    env: "EXTENSION_NAMING_STYLE",
+    section: "naming",
+    tier: "advanced",
+    type: "enum",
+    label: "How extension elements are named",
+    description: "Whether extension classes/elements embed the prefix (per the Microsoft prefix guideline) or the model name (the Visual Studio default). Use model-name when your model name is long but your prefix is a short abbreviation.",
+    default: "prefix",
+    choices: [
+      { value: "prefix", hint: "CustTable.CrExtension \u2014 embeds the extension prefix" },
+      { value: "model-name", hint: "CustTable.ContosoRobotics \u2014 embeds the model name (VS default)" }
+    ]
+  },
+  // ── index ────────────────────────────────────────────────────────────────
+  {
+    path: "index.extractMode",
+    env: "EXTRACT_MODE",
+    section: "index",
+    tier: "basic",
+    type: "enum",
+    label: "What to index",
+    description: 'Scope of the metadata extraction. "all" gives full cross-reference search over the standard application but takes 1\u20132 hours and produces a multi-GB database; "custom" indexes only your own models and finishes in minutes.',
+    default: "all",
+    choices: [
+      { value: "all", hint: "standard + custom \u2014 full search, 1\u20132 h build" },
+      { value: "custom", hint: "custom models only \u2014 minutes" },
+      { value: "standard", hint: "Microsoft models only" }
+    ]
+  },
+  {
+    path: "index.includeLabels",
+    env: "INCLUDE_LABELS",
+    section: "index",
+    tier: "basic",
+    type: "boolean",
+    label: "Index label files",
+    description: 'Builds the labels database so labels(action="search") and label reuse work. Disabling it speeds up the build and shrinks the index, at the cost of label lookup.',
+    default: true
+  },
+  {
+    path: "index.labelLanguages",
+    env: "LABEL_LANGUAGES",
+    section: "index",
+    tier: "basic",
+    type: "list",
+    label: "Label languages to index",
+    description: "Comma-separated language codes, or `all` for every language shipped with the model. Each extra language multiplies the label table (~125 MB apiece) \u2014 indexing only the languages you actually ship keeps the database small.",
+    // src/metadata/labelParser.ts reads this default straight off the registry:
+    // it used to carry its own 'en-US,cs,sk,de' literal, so an unconfigured
+    // build silently indexed four languages while this table promised one.
+    default: ["en-US"],
+    placeholder: "en-US,cs,de"
+  },
+  {
+    path: "index.dbPath",
+    env: "DB_PATH",
+    section: "index",
+    tier: "advanced",
+    type: "path",
+    label: "Metadata database file",
+    description: "SQLite file holding the indexed X++ metadata. Relative paths resolve from the config file directory.",
+    default: "./data/xpp-metadata.db"
+  },
+  {
+    path: "index.labelsDbPath",
+    env: "LABELS_DB_PATH",
+    section: "index",
+    tier: "advanced",
+    type: "path",
+    label: "Labels database file",
+    description: "Second SQLite file for labels (dual-database architecture keeps label writes from locking metadata reads). Defaults to <dbPath>-labels.db.",
+    default: "./data/xpp-metadata-labels.db"
+  },
+  {
+    path: "index.metadataPath",
+    env: "METADATA_PATH",
+    section: "index",
+    tier: "advanced",
+    type: "path",
+    label: "Extracted XML folder",
+    description: "Working folder for the XML dumped during extraction, before it is loaded into the database.",
+    default: "./extracted-metadata"
+  },
+  {
+    path: "index.labelSortOrder",
+    env: "LABEL_SORT_ORDER",
+    section: "index",
+    tier: "advanced",
+    type: "enum",
+    label: "Where new labels are inserted",
+    description: "Alphabetical keeps .label.txt files sorted (smaller diffs, matches most teams); append adds new labels at the end of the file (preserves manual grouping).",
+    default: "alphabetical",
+    choices: [
+      { value: "alphabetical", hint: "insert in sorted position" },
+      { value: "append", hint: "add at the end of the file" }
+    ]
+  },
+  {
+    path: "index.computeStats",
+    env: "COMPUTE_STATS",
+    section: "index",
+    tier: "advanced",
+    type: "boolean",
+    label: "Compute usage statistics during build",
+    description: "Adds per-object usage counts used for ranking. Noticeably slows down large builds.",
+    default: false
+  },
+  // ── server ───────────────────────────────────────────────────────────────
+  {
+    path: "server.mode",
+    env: "MCP_SERVER_MODE",
+    section: "server",
+    tier: "advanced",
+    type: "enum",
+    label: "Server mode",
+    description: 'Which half of the toolset this process exposes. "full" is a single local server; the hybrid deployment splits into an Azure "read-only" instance plus a local "write-only" companion that owns the C# bridge.',
+    default: "full",
+    choices: [
+      { value: "full", hint: "all tools \u2014 single local server" },
+      { value: "read-only", hint: "search/inspect only \u2014 Azure-hosted shared index" },
+      { value: "write-only", hint: "create/modify/build only \u2014 local companion" }
+    ]
+  },
+  {
+    path: "server.toolProfile",
+    env: "MCP_TOOL_PROFILE",
+    section: "server",
+    tier: "advanced",
+    type: "enum",
+    label: "Tool profile",
+    description: 'How many tools this server advertises. "full" publishes all 23. "core" publishes only the plan \u2192 discover \u2192 write \u2192 build \u2192 verify loop (18 tools) and leaves out the specialist ones (extension_info, analyze_code, validate_code, security_info, run_systest_class). Worth switching when the workspace runs several MCP servers at once: hosts stop sending the tool catalogue inline past a limit (VS Code: ~100 tools) and make the model search for tools first, which costs a round trip per tool.',
+    default: "full",
+    choices: [
+      { value: "full", hint: "all 23 tools" },
+      { value: "core", hint: "18-tool create-and-build loop" }
+    ]
+  },
+  {
+    path: "server.extraTools",
+    env: "MCP_EXTRA_TOOLS",
+    section: "server",
+    tier: "advanced",
+    type: "list",
+    label: "Extra tools on top of the core profile",
+    description: 'Tool names to publish in addition to the core profile, e.g. security_info,run_systest_class. Ignored when the tool profile is "full".',
+    placeholder: "security_info,run_systest_class"
+  },
+  {
+    path: "server.port",
+    env: "PORT",
+    section: "server",
+    tier: "basic",
+    type: "int",
+    label: "HTTP port",
+    description: "Port for the HTTP transport. Only relevant when clients connect over http://localhost:<port>/mcp/ \u2014 an IDE that spawns the server itself uses stdio and ignores this.",
+    default: 8080
+  },
+  {
+    path: "server.host",
+    env: "HOST",
+    section: "server",
+    tier: "advanced",
+    type: "string",
+    label: "HTTP bind address",
+    description: "Interface the HTTP transport binds to. Left unset it follows the API key: 0.0.0.0 once a key (or ALLOW_UNAUTHENTICATED) is configured, which is what a container or App Service needs, and 127.0.0.1 when neither is, so an unauthenticated server stays off the network. Setting it to a public interface without a key is refused at startup.",
+    default: "0.0.0.0"
+  },
+  {
+    path: "server.shutdownTimeoutMs",
+    env: "SHUTDOWN_TIMEOUT_MS",
+    section: "server",
+    tier: "advanced",
+    type: "int",
+    label: "Graceful shutdown deadline (ms)",
+    description: "How long SIGTERM/SIGINT handling waits for in-flight work (bridge writes, database checkpoints) before the process exits anyway. Clamped to a minimum of 1000.",
+    default: 5e3
+  },
+  {
+    env: "OPERATION_LOCK_HEARTBEAT_MS",
+    section: "server",
+    // env-only: the lock holder reads this at acquire time in a process the
+    // wizard never configures, so a JSON key would misrepresent when a change
+    // takes effect.
+    tier: "env-only",
+    type: "int",
+    label: "Operation-lock heartbeat interval (ms)",
+    description: "How often the holder of a long-running operation lock (build, DB sync) touches it so the stale-lock reaper can tell a live owner from an abandoned one. Lower it only if a reaper is killing locks that are still working; the reaper already refuses to age out a lock whose owner pid is alive.",
+    default: 6e4
+  },
+  {
+    path: "server.debugLogging",
+    env: "DEBUG_LOGGING",
+    section: "server",
+    tier: "advanced",
+    type: "boolean",
+    label: "Verbose debug logging",
+    description: "Prints per-step diagnostics to stderr. Useful when a tool misbehaves; noisy otherwise.",
+    default: false
+  },
+  {
+    path: "server.logFile",
+    env: "LOG_FILE",
+    section: "server",
+    tier: "advanced",
+    type: "path",
+    label: "Mirror stderr to a log file",
+    description: "Absolute path; the server appends everything it writes to stderr. The way to get logs out of an IDE that hides MCP subprocess output."
+  },
+  {
+    path: "server.forceHttp",
+    env: "MCP_FORCE_HTTP",
+    section: "server",
+    tier: "advanced",
+    type: "boolean",
+    label: "Force HTTP transport",
+    description: "The server picks stdio when its stdin is piped. Set this to keep HTTP anyway \u2014 e.g. when running under a process supervisor that pipes stdin.",
+    default: false
+  },
+  {
+    path: "server.toolTimeoutMs",
+    env: "MCP_TOOL_TIMEOUT_MS",
+    section: "server",
+    tier: "advanced",
+    type: "int",
+    label: "Default tool timeout (ms)",
+    description: "Upper bound for a single tool call before the server returns a timeout error.",
+    default: 12e4
+  },
+  {
+    path: "server.apiKeyCacheTtlMs",
+    env: "API_KEY_CACHE_TTL_MS",
+    section: "server",
+    tier: "advanced",
+    type: "int",
+    label: "Customer API key cache TTL (ms)",
+    description: "How long a per-customer key lookup is trusted before Neon is consulted again. This IS the revocation delay: a revoked key keeps working for up to this long on an already-running instance. Lower it when immediate cutoff matters more than latency; 0 disables caching and costs a query per request.",
+    default: 6e4
+  },
+  {
+    path: "server.toolTimeoutFastMs",
+    env: "MCP_TOOL_TIMEOUT_FAST_MS",
+    section: "server",
+    tier: "advanced",
+    type: "int",
+    label: "Fast-tool timeout (ms)",
+    description: "Timeout for lookups that should always be quick (minimum 5000).",
+    default: 3e4
+  },
+  {
+    path: "server.toolTimeoutHeavyMs",
+    env: "MCP_TOOL_TIMEOUT_HEAVY_MS",
+    section: "server",
+    tier: "advanced",
+    type: "int",
+    label: "Heavy-tool timeout (ms)",
+    description: "Timeout for builds, DB sync and test runs (minimum 60000). Raise it on slow VMs.",
+    default: 6e5
+  },
+  {
+    path: "server.readPoolSize",
+    env: "READ_POOL_SIZE",
+    section: "server",
+    tier: "advanced",
+    type: "int",
+    label: "SQLite read connections",
+    description: "Parallel read connections to the index (clamped 1\u20138). More helps concurrent searches on fast disks.",
+    default: 3
+  },
+  {
+    path: "server.operationLockTimeoutMs",
+    env: "OPERATION_LOCK_TIMEOUT_MS",
+    section: "server",
+    tier: "advanced",
+    type: "int",
+    label: "Wait for a conflicting operation (ms)",
+    description: "How long a build/sync waits for another one to finish before failing.",
+    default: 9e5
+  },
+  {
+    path: "server.operationLockPollMs",
+    env: "OPERATION_LOCK_POLL_MS",
+    section: "server",
+    tier: "advanced",
+    type: "int",
+    label: "Lock poll interval (ms)",
+    description: "How often the waiting process re-checks the lock.",
+    default: 250
+  },
+  {
+    path: "server.operationLockStaleMs",
+    env: "OPERATION_LOCK_STALE_MS",
+    section: "server",
+    tier: "advanced",
+    type: "int",
+    label: "Lock considered abandoned after (ms)",
+    description: "A lock older than this is treated as left behind by a crashed process and broken.",
+    default: 12e5
+  },
+  {
+    path: "server.slowCallLogMs",
+    env: "SLOW_CALL_LOG_MS",
+    section: "server",
+    tier: "advanced",
+    type: "int",
+    label: "Log a tool call slower than (ms)",
+    description: "Writes one line per tool call that exceeds this, with the tool name and a short argument digest. Aggregate metrics cannot say which specific call cost five minutes; this can. Set LOG_FILE to keep the lines.",
+    default: 1e4
+  },
+  // ── bridge ───────────────────────────────────────────────────────────────
+  {
+    path: "bridge.readyTimeoutMs",
+    env: "BRIDGE_READY_TIMEOUT_MS",
+    section: "bridge",
+    tier: "advanced",
+    type: "int",
+    label: "Bridge startup timeout (ms)",
+    description: "Time allowed for the metadata provider to initialise. Raise it on large installations.",
+    default: 3e4
+  },
+  {
+    path: "bridge.callTimeoutMs",
+    env: "BRIDGE_CALL_TIMEOUT_MS",
+    section: "bridge",
+    tier: "advanced",
+    type: "int",
+    label: "Bridge call timeout (ms)",
+    description: "Per-request timeout for a single bridge call. Big searches on slow VMs may need more.",
+    default: 6e4
+  },
+  {
+    path: "bridge.maxRetries",
+    env: "BRIDGE_MAX_RETRIES",
+    section: "bridge",
+    tier: "advanced",
+    type: "int",
+    label: "Retries for read calls",
+    description: "Read calls are retried after a health-checked restart of the child process. Writes are never retried \u2014 a timed-out write may already have been applied. 0 disables retries.",
+    default: 2
+  },
+  {
+    path: "bridge.healthcheckMs",
+    env: "BRIDGE_HEALTHCHECK_MS",
+    section: "bridge",
+    tier: "advanced",
+    type: "int",
+    label: "Idle ping interval (ms)",
+    description: "Proactively detects a wedged bridge while idle. 0 disables the ping.",
+    default: 0
+  },
+  {
+    path: "bridge.maxRestarts",
+    env: "BRIDGE_MAX_RESTARTS",
+    section: "bridge",
+    tier: "advanced",
+    type: "int",
+    label: "Max restarts per minute",
+    description: "Circuit breaker: after this many respawns within 60 s the server stops trying.",
+    default: 3
+  },
+  {
+    path: "bridge.exePath",
+    env: "D365FO_BRIDGE_EXE_PATH",
+    section: "bridge",
+    tier: "advanced",
+    type: "path",
+    label: "Bridge executable",
+    description: "Absolute path to D365MetadataBridge.exe. Leave empty to auto-detect inside the installation \u2014 the setup wizard fills this in for an npm install, where the binary is built outside the package so that updating the package does not delete it."
+  },
+  {
+    path: "bridge.logFile",
+    env: "D365FO_BRIDGE_LOG_FILE",
+    section: "bridge",
+    tier: "advanced",
+    type: "path",
+    label: "Bridge diagnostic log",
+    description: "Absolute path the C# bridge appends its own diagnostics to."
+  },
+  {
+    path: "bridge.fsScanTimeoutMs",
+    env: "D365FO_FS_SCAN_TIMEOUT_MS",
+    section: "bridge",
+    tier: "advanced",
+    type: "int",
+    label: "Filesystem fallback scan timeout (ms)",
+    description: "Budget for the filesystem scan used when the bridge cannot answer an extension lookup (minimum 500).",
+    default: 3e3
+  },
+  {
+    path: "bridge.disableFsFallback",
+    env: "D365FO_DISABLE_FS_FALLBACK",
+    section: "bridge",
+    tier: "advanced",
+    type: "boolean",
+    label: "Disable the filesystem fallback",
+    description: "Makes extension lookups bridge-only. Turn on to diagnose stale-index issues \u2014 results get stricter, not faster.",
+    default: false
+  },
+  // ── behavior ─────────────────────────────────────────────────────────────
+  {
+    path: "behavior.formPatternEnforce",
+    env: "FORM_PATTERN_ENFORCE",
+    section: "behavior",
+    tier: "advanced",
+    type: "boolean",
+    label: "Block form writes that break the pattern",
+    description: "Structural form-pattern violations (unknown pattern, missing container, wrong control order) block the write. Disable to log them as warnings instead.",
+    default: true
+  },
+  {
+    path: "behavior.groundingEnforce",
+    env: "GROUNDING_ENFORCE",
+    section: "behavior",
+    tier: "advanced",
+    type: "boolean",
+    label: "Require grounding tokens for writes",
+    description: "Write tools only accept a token issued by prepare(), proving the model actually inspected the real object before generating code. Strongly recommended for agent use; adds one extra call per write.",
+    default: false
+  },
+  // ── azure ────────────────────────────────────────────────────────────────
+  {
+    path: "azure.blobContainer",
+    env: "BLOB_CONTAINER_NAME",
+    section: "azure",
+    tier: "advanced",
+    type: "string",
+    label: "Blob container with the index",
+    description: "Container the pre-built database is downloaded from at startup.",
+    default: "xpp-metadata"
+  },
+  {
+    path: "azure.blobDatabase",
+    env: "BLOB_DATABASE_NAME",
+    section: "azure",
+    tier: "advanced",
+    type: "string",
+    label: "Blob name of the database",
+    description: "Path of the database blob inside the container.",
+    default: "databases/xpp-metadata-latest.db"
+  },
+  // ── secrets (config/secrets.json) ────────────────────────────────────────
+  {
+    path: "azure.storageConnectionString",
+    env: "AZURE_STORAGE_CONNECTION_STRING",
+    section: "azure",
+    tier: "secret",
+    type: "string",
+    label: "Azure storage connection string",
+    description: "Used to download the shared index (Azure Portal \u2192 Storage Account \u2192 Access keys). Stored in config/secrets.json."
+  },
+  {
+    path: "server.apiKey",
+    env: "API_KEY",
+    section: "server",
+    tier: "secret",
+    type: "string",
+    label: "API key required from HTTP clients",
+    description: "Every HTTP request must present this key as X-Api-Key (or Authorization: Bearer). Required for any server reachable from the network \u2014 without it the listener serves your indexed X++ source to anyone who can reach the port, so with no key set the server binds 127.0.0.1 instead, and refuses to start if HOST asks for a public interface anyway. May be left empty only for a localhost-only development server. Generate with `openssl rand -hex 32`."
+  },
+  {
+    path: "behavior.groundingSecret",
+    env: "GROUNDING_SECRET",
+    section: "behavior",
+    tier: "secret",
+    type: "string",
+    label: "Shared secret for portable grounding tokens",
+    description: "Set the SAME random string on both halves of a hybrid deployment (and on every scaled-out App Service instance) so tokens issued by one process validate in another. Without it, tokens are memory-local."
+  }
+];
+var BY_PATH = new Map(SETTINGS.flatMap((s) => s.path ? [[s.path, s]] : []));
+var BY_ENV = new Map(SETTINGS.map((s) => [s.env, s]));
+function settingByEnv(env) {
+  return BY_ENV.get(env);
+}
+function serializeValue(setting, value) {
+  if (value === void 0 || value === null) return null;
+  switch (setting.type) {
+    case "boolean":
+      return value ? "true" : "false";
+    case "int":
+      return String(value);
+    case "list":
+      return Array.isArray(value) ? value.join(",") : String(value);
+    default: {
+      const s = String(value);
+      return s.length > 0 ? s : null;
+    }
+  }
+}
+
+// src/config/configFile.ts
+function getAtPath(obj, path4) {
+  if (!obj || !path4) return void 0;
+  return path4.split(".").reduce((acc, key) => acc == null ? void 0 : acc[key], obj);
+}
+function configCandidates(baseDir) {
+  return [join(baseDir, "d365fo-mcp.json"), join(baseDir, "config", "d365fo-mcp.json")];
+}
+function readJson(file) {
+  try {
+    if (!fs.existsSync(file)) return null;
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    return typeof parsed === "object" && parsed !== null ? parsed : null;
+  } catch (err) {
+    process.stderr.write(`[config] Cannot parse ${file}: ${err instanceof Error ? err.message : String(err)}
+`);
+    return null;
+  }
+}
+function resolveConfigFiles(baseDir, opts) {
+  const explicit = opts?.allowEnvOverride === false ? void 0 : process.env.D365FO_CONFIG?.trim();
+  const configPath = explicit ? resolve(explicit) : configCandidates(baseDir).find((p) => fs.existsSync(p)) ?? opts?.fallbackConfigPath ?? join(baseDir, "config", "d365fo-mcp.json");
+  const dir = dirname(configPath);
+  return {
+    dir,
+    baseDir: configBaseDir(configPath),
+    configPath,
+    secretsPath: join(dir, "secrets.json"),
+    config: readJson(configPath),
+    secrets: readJson(join(dir, "secrets.json"))
+  };
+}
+function configBaseDir(configPath) {
+  const dir = dirname(configPath);
+  return basename(dir).toLowerCase() === "config" ? dirname(dir) : dir;
+}
+function toEnvRecord(files) {
+  const out = {};
+  for (const setting of SETTINGS) {
+    const source = setting.tier === "secret" ? files.secrets : files.config;
+    const raw = getAtPath(source, setting.path);
+    const value = serializeValue(setting, raw);
+    if (value === null) continue;
+    out[setting.env] = setting.type === "path" && !isAbsolute(value) ? resolve(files.baseDir, value) : value;
+  }
+  return out;
+}
+function defaultPathEnv(baseDir) {
+  const out = {};
+  for (const setting of SETTINGS) {
+    if (!setting.path || setting.type !== "path" || typeof setting.default !== "string" || setting.default === "") continue;
+    out[setting.env] = isAbsolute(setting.default) ? setting.default : resolve(baseDir, setting.default);
+  }
+  return out;
+}
+
+// src/utils/loadEnv.ts
+var PATH_VARS = ["DB_PATH", "LABELS_DB_PATH", "METADATA_PATH"];
+var WRITE_POLICY_VARS = [
+  "D365FO_ALLOW_CROSS_MODEL_WRITE",
+  "D365FO_CROSS_MODEL_WRITE_MODELS"
+];
+var writePolicySource = null;
+var writePolicyStamp = "";
+function installRootFrom(callerDir) {
+  let dir = resolve2(callerDir, "..");
+  for (let up = 0; up < 3; up++) {
+    const hasConfig = existsSync2(join2(dir, "config", "d365fo-mcp.json")) || existsSync2(join2(dir, "d365fo-mcp.json")) || existsSync2(join2(dir, ".env"));
+    if (hasConfig) return dir;
+    const parent = dirname2(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return resolve2(callerDir, "..");
+}
+function loadEnv(callerImportMetaUrl) {
+  const callerDir = dirname2(fileURLToPath(callerImportMetaUrl));
+  const envPath = process.env.ENV_FILE ? resolve2(process.env.ENV_FILE) : resolve2(installRootFrom(callerDir), ".env");
+  const fromRealEnv = new Set(Object.keys(process.env));
+  writePolicySource = {
+    envPath,
+    pinned: new Set(WRITE_POLICY_VARS.filter((k) => fromRealEnv.has(k)))
+  };
+  try {
+    writePolicyStamp = String(statSync(envPath).mtimeMs);
+  } catch {
+    writePolicyStamp = "-";
+  }
+  const result = dotenv.config({ path: envPath, quiet: true });
+  if (result.error && !process.env.ENV_FILE) {
+    dotenv.config({ quiet: true });
+  }
+  const envDir = dirname2(envPath);
+  for (const key of PATH_VARS) {
+    const val = process.env[key];
+    if (val && !isAbsolute2(val)) {
+      process.env[key] = resolve2(envDir, val);
+    }
+  }
+  const pinnedByEnvFile = process.env.ENV_FILE && !process.env.D365FO_CONFIG ? new Set(Object.keys(result.parsed ?? {})) : /* @__PURE__ */ new Set();
+  const files = resolveConfigFiles(envDir);
+  for (const [key, value] of Object.entries(toEnvRecord(files))) {
+    if (!fromRealEnv.has(key) && !pinnedByEnvFile.has(key)) process.env[key] = value;
+  }
+  for (const [key, value] of Object.entries(defaultPathEnv(files.baseDir))) {
+    if (!process.env[key]) process.env[key] = value;
+  }
+  if (process.env.D365FO_DEV_ENVIRONMENT_TYPE) {
+    process.env.DEV_ENVIRONMENT_TYPE = process.env.D365FO_DEV_ENVIRONMENT_TYPE;
+  }
+}
+
+// src/bootstrapEnv.ts
+loadEnv(import.meta.url);
+
+// scripts/build-fts.ts
+import * as fsSync2 from "fs";
+
+// src/database/nodeSqlite.ts
+import { createRequire } from "node:module";
+function load() {
+  const original = process.emitWarning.bind(process);
+  process.emitWarning = ((warning, ...rest) => {
+    const message = typeof warning === "string" ? warning : warning?.message ?? "";
+    const first = rest[0];
+    const type = typeof first === "string" ? first : first?.type ?? "";
+    if (type === "ExperimentalWarning" && /\bSQLite\b/.test(message)) return;
+    original(warning, ...rest);
+  });
+  try {
+    return createRequire(import.meta.url)("node:sqlite");
+  } finally {
+    process.emitWarning = original;
+  }
+}
+var { DatabaseSync: DatabaseSyncClass } = load();
+
+// src/database/sqlite.ts
+var OBJECT_PROTO = Object.prototype;
+function reproto(row) {
+  if (row !== null && typeof row === "object") Object.setPrototypeOf(row, OBJECT_PROTO);
+  return row;
+}
+var Statement = class {
+  constructor(stmt) {
+    this.stmt = stmt;
+  }
+  stmt;
+  run(...params) {
+    return this.stmt.run(...params);
+  }
+  get(...params) {
+    const row = this.stmt.get(...params);
+    return row === void 0 ? void 0 : reproto(row);
+  }
+  all(...params) {
+    const rows = this.stmt.all(...params);
+    for (let i = 0; i < rows.length; i++) reproto(rows[i]);
+    return rows;
+  }
+  *iterate(...params) {
+    for (const row of this.stmt.iterate(...params)) {
+      yield reproto(row);
+    }
+  }
+};
+var Database = class {
+  handle;
+  /**
+   * Depth of nested transaction() calls. better-sqlite3 nests via SAVEPOINT;
+   * plain BEGIN would throw "cannot start a transaction within a transaction".
+   */
+  txDepth = 0;
+  name;
+  constructor(filename, options = {}) {
+    this.name = filename;
+    this.handle = new DatabaseSyncClass(filename, {
+      readOnly: options.readonly === true,
+      // better-sqlite3 leaves foreign_keys at SQLite's OFF default; node:sqlite
+      // turns them on. Our schema has FK columns that are intentionally not
+      // enforced (rows are inserted out of order during a build).
+      enableForeignKeyConstraints: false
+    });
+  }
+  get open() {
+    return this.handle.isOpen;
+  }
+  /**
+   * `PRAGMA <source>`. With `{ simple: true }` returns the first column of the
+   * first row (better-sqlite3's shorthand for scalar pragmas such as
+   * journal_mode); otherwise the full row array. Assignment pragmas
+   * ("cache_size = -64000") return an empty array.
+   */
+  pragma(source, options) {
+    let rows;
+    try {
+      rows = this.handle.prepare(`PRAGMA ${source}`).all();
+    } catch {
+      this.handle.exec(`PRAGMA ${source}`);
+      rows = [];
+    }
+    if (options?.simple) {
+      const first = rows[0];
+      return first === void 0 ? void 0 : Object.values(first)[0];
+    }
+    for (const row of rows) reproto(row);
+    return rows;
+  }
+  prepare(sql) {
+    return new Statement(this.handle.prepare(sql));
+  }
+  exec(sql) {
+    this.handle.exec(sql);
+  }
+  /**
+   * Wraps `fn` so that calling it runs inside a transaction, rolling back if it
+   * throws. Matches better-sqlite3's `db.transaction(fn)`: arguments passed to
+   * the returned function are forwarded to `fn`, and the return value is
+   * `fn`'s.
+   */
+  transaction(fn) {
+    return (...args) => {
+      const depth = this.txDepth++;
+      const nested = depth > 0;
+      const savepoint = `d365fo_sp_${depth}`;
+      this.handle.exec(nested ? `SAVEPOINT ${savepoint}` : "BEGIN");
+      try {
+        const result = fn(...args);
+        this.handle.exec(nested ? `RELEASE ${savepoint}` : "COMMIT");
+        return result;
+      } catch (err) {
+        try {
+          this.handle.exec(
+            nested ? `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}` : "ROLLBACK"
+          );
+        } catch {
+        }
+        throw err;
+      } finally {
+        this.txDepth--;
+      }
+    };
+  }
+  close() {
+    if (this.handle.isOpen) this.handle.close();
+  }
+};
+var sqlite_default = Database;
+
+// src/metadata/symbolIndex.ts
+import { Worker } from "node:worker_threads";
+import * as fs2 from "fs";
+import * as path from "path";
+
+// src/metadata/xppDeclaration.ts
+var UNKNOWN_PARAMETER_LIST = "...";
+function renderMethodSignature(method) {
+  const params = method.parametersUnknown ? UNKNOWN_PARAMETER_LIST : (method.parameters ?? []).map((p) => `${p.type} ${p.name}${p.defaultValue ? ` = ${p.defaultValue}` : ""}`).join(", ");
+  return `${method.returnType ?? "void"} ${method.name}(${params})`;
+}
+
+// src/utils/modelClassifier.ts
+var autoDetectedCustomModels = /* @__PURE__ */ new Set();
+function isAutoDetectedCustomModel(modelName) {
+  return autoDetectedCustomModels.has(modelName);
+}
+function getCustomModels() {
+  return process.env.CUSTOM_MODELS?.split(",").map((m) => m.trim()).filter(Boolean) || [];
+}
+function getExtensionPrefix() {
+  return process.env.EXTENSION_PREFIX || "";
+}
+function getConfiguredModelName() {
+  return process.env.D365FO_MODEL_NAME?.trim() || "";
+}
+function matchesPattern(pattern, modelName) {
+  const patternLower = pattern.toLowerCase();
+  const modelLower = modelName.toLowerCase();
+  if (!patternLower.includes("*")) {
+    return patternLower === modelLower;
+  }
+  const regexPattern = patternLower.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  const regex = new RegExp(`^${regexPattern}$`);
+  return regex.test(modelLower);
+}
+function isCustomModel(modelName) {
+  if (isAutoDetectedCustomModel(modelName)) {
+    return true;
+  }
+  const configuredModel = getConfiguredModelName();
+  if (configuredModel && configuredModel.toLowerCase() === modelName.toLowerCase()) {
+    return true;
+  }
+  const customModels = getCustomModels();
+  const extensionPrefix = getExtensionPrefix();
+  const isInCustomList = customModels.some((pattern) => matchesPattern(pattern, modelName));
+  const hasExtensionPrefix = matchesExtensionPrefix(extensionPrefix, modelName);
+  return isInCustomList || hasExtensionPrefix;
+}
+function matchesExtensionPrefix(extensionPrefix, modelName) {
+  const rawPrefix = extensionPrefix.trim().toLowerCase();
+  if (!rawPrefix) return false;
+  const effective = rawPrefix.replace(/_+$/, "") || rawPrefix;
+  return modelName.toLowerCase().startsWith(effective);
+}
+function isStandardModel(modelName) {
+  return !isCustomModel(modelName);
+}
+
+// src/utils/labelReference.ts
+function parseLabelReference(ref) {
+  const s = (ref ?? "").trim();
+  if (!s) return { labelId: "" };
+  const modern = /^@([A-Za-z][A-Za-z0-9_]*):(.+)$/.exec(s);
+  if (modern) return { labelFileId: modern[1], labelId: modern[2] };
+  return { labelId: s.startsWith("@") ? s.slice(1) : s };
+}
+var LEGACY_LABEL_ID = /^[A-Za-z]{2,4}\d+$/;
+function labelIdSpellings(labelId) {
+  const id = (labelId ?? "").trim();
+  if (!id) return [];
+  const out = [id, `@${id}`];
+  if (LEGACY_LABEL_ID.test(id)) {
+    const upper = id.toUpperCase();
+    if (upper !== id) out.push(upper, `@${upper}`);
+  }
+  return [...new Set(out)];
+}
+
+// src/utils/terminalUi.ts
+var isWin = process.platform === "win32";
+var supportsUnicode = (() => {
+  if (process.env.FORCE_UNICODE === "1") return true;
+  if (process.env.FORCE_UNICODE === "0") return false;
+  if (!isWin) return process.env.TERM !== "linux";
+  return Boolean(process.env.WT_SESSION) || // Windows Terminal
+  process.env.TERM_PROGRAM === "vscode" || Boolean(process.env.ConEmuTask) || // ConEmu / Cmder
+  process.env.TERM === "xterm-256color" || process.env.WSLENV !== void 0;
+})();
+var supportsColor = (() => {
+  if (process.env.FORCE_COLOR && process.env.FORCE_COLOR !== "0") return true;
+  if ("NO_COLOR" in process.env) return false;
+  if (process.env.TERM === "dumb") return false;
+  return Boolean(process.stdout.isTTY);
+})();
+var wrap = (open, close) => (s) => supportsColor ? `\x1B[${open}m${s}\x1B[${close}m` : s;
+var c = {
+  bold: wrap(1, 22),
+  dim: wrap(2, 22),
+  red: wrap(31, 39),
+  green: wrap(32, 39),
+  yellow: wrap(33, 39),
+  blue: wrap(34, 39),
+  magenta: wrap(35, 39),
+  cyan: wrap(36, 39),
+  gray: wrap(90, 39)
+};
+var U = supportsUnicode;
+var glyph = {
+  tl: U ? "\u256D" : "+",
+  tr: U ? "\u256E" : "+",
+  bl: U ? "\u2570" : "+",
+  br: U ? "\u256F" : "+",
+  h: U ? "\u2500" : "-",
+  v: U ? "\u2502" : "|",
+  dot: U ? "\xB7" : "-",
+  ok: U ? "\u2713" : "OK",
+  warn: U ? "\u25B2" : "!",
+  err: U ? "\u2717" : "x",
+  info: U ? "\u2139" : "i",
+  arrow: U ? "\u203A" : ">",
+  bullet: U ? "\u2022" : "*",
+  ellipsis: U ? "\u2026" : "..."
+};
+function statusLine(kind, msg) {
+  const map = {
+    step: [glyph.arrow, c.cyan],
+    ok: [glyph.ok, c.green],
+    warn: [glyph.warn, c.yellow],
+    err: [glyph.err, c.red],
+    info: [glyph.info, c.gray]
+  };
+  const [g, paint] = map[kind];
+  return "  " + paint(g) + " " + msg;
+}
+var startupWarnings = [];
+var log = {
+  step: (msg) => console.log(statusLine("step", msg)),
+  ok: (msg) => console.log(statusLine("ok", msg)),
+  info: (msg) => console.log(statusLine("info", msg)),
+  warn: (msg) => {
+    startupWarnings.push(msg);
+    console.error(statusLine("warn", msg));
+  },
+  err: (msg) => console.error(statusLine("err", msg)),
+  detail: (msg) => console.log("      " + c.dim(msg))
+};
+
+// src/metadata/symbolIndex.ts
+var isCI = () => {
+  return !!(process.env.CI || process.env.TF_BUILD || process.env.GITHUB_ACTIONS);
+};
+var SUGGESTION_CACHE_ENTRIES = 32;
+var XppSymbolIndex = class _XppSymbolIndex {
+  db;
+  // Public for direct pragma access in build scripts
+  labelsDb;
+  // Separate DB for labels (performance optimization)
+  stmtCache = /* @__PURE__ */ new Map();
+  labelsStmtCache = /* @__PURE__ */ new Map();
+  // Buffer for property_stats observations — flushed once per model (batch INSERT)
+  // Key: "nodeType|property|value|model", Value: accumulated count
+  propStatBuffer = /* @__PURE__ */ new Map();
+  // Per-run "not authored by Microsoft" set (lowercased), supplied by the caller —
+  // see setNonMicrosoftModels(). null = caller said nothing, fall back to isStandardModel().
+  nonMicrosoftModels = null;
+  // isStandardModel() re-parses env on every call and the miners run per node; the
+  // answer is constant per model within a run. Cleared by setNonMicrosoftModels().
+  mineableModelCache = /* @__PURE__ */ new Map();
+  // Read-only connection pool: WAL mode allows N readers + 1 writer without
+  // blocking each other. Pool size: READ_POOL_SIZE env var (default 3, clamped 1-8).
+  // Not used for :memory: databases (each connection would be a separate empty DB).
+  readPool = [];
+  labelsReadPool = [];
+  readPoolRR = 0;
+  // Symbol-count scans are expensive (full index scan of 1M+ rows, 30-60 s
+  // cold) — memoize the result and compute it off-thread (see getSymbolCounts).
+  dbPath;
+  // Needed alongside dbPath so ensureFilePathIndexes() can size the labels DB
+  // and hand its path to the background index builder.
+  labelsDbPath = ":memory:";
+  symbolCountsCache = null;
+  symbolCountsPromise = null;
+  // "Did you mean" candidate pools, keyed by query. An agent that guesses a name
+  // wrong tends to guess near it again, and both pools are derived purely from the
+  // index — recomputing them per probe is the whole cost of a failed search.
+  // Bounded so a long session cannot accumulate one entry per typo.
+  suggestionNamesCache = /* @__PURE__ */ new Map();
+  symbolsByTermCache = null;
+  // Per-connection prepared-statement cache.  Prepared statements are bound to
+  // their originating connection and cannot be shared across connections.
+  perConnStmtCache = /* @__PURE__ */ new WeakMap();
+  /**
+   * Directory holding the metadata databases. Sibling marker files (the blob-download
+   * note, the last-build record) live here so they travel with the index they describe.
+   */
+  get dataDir() {
+    return path.dirname(this.dbPath);
+  }
+  constructor(dbPath, labelsDbPath) {
+    this.dbPath = dbPath;
+    const dbDir = path.dirname(dbPath);
+    if (!fs2.existsSync(dbDir)) {
+      fs2.mkdirSync(dbDir, { recursive: true });
+    }
+    this.db = new sqlite_default(dbPath);
+    const labelPath = labelsDbPath || dbPath.replace(".db", "-labels.db");
+    this.labelsDbPath = labelPath;
+    this.labelsDb = new sqlite_default(labelPath);
+    const currentJournalMode = this.db.pragma("journal_mode", { simple: true });
+    if (currentJournalMode !== "wal") {
+      this.db.pragma("journal_mode = WAL");
+    }
+    this.db.pragma("synchronous = NORMAL");
+    this.db.pragma("cache_size = -64000");
+    this.db.pragma("temp_store = MEMORY");
+    this.db.pragma("mmap_size = 1073741824");
+    this.db.pragma("busy_timeout = 5000");
+    this.db.pragma("wal_autocheckpoint = 4000");
+    const labelsJournalMode = this.labelsDb.pragma("journal_mode", { simple: true });
+    if (labelsJournalMode !== "wal") {
+      this.labelsDb.pragma("journal_mode = WAL");
+    }
+    this.labelsDb.pragma("synchronous = NORMAL");
+    this.labelsDb.pragma("cache_size = -32000");
+    this.labelsDb.pragma("temp_store = MEMORY");
+    this.labelsDb.pragma("mmap_size = 536870912");
+    this.labelsDb.pragma("busy_timeout = 5000");
+    this.labelsDb.pragma("wal_autocheckpoint = 4000");
+    this.initializeDatabase();
+    if (dbPath !== ":memory:") {
+      const poolSize = Math.min(8, Math.max(
+        1,
+        parseInt(process.env.READ_POOL_SIZE || "3", 10) || 3
+      ));
+      for (let i = 0; i < poolSize; i++) {
+        const rConn = new sqlite_default(dbPath, { readonly: true });
+        rConn.pragma("busy_timeout = 5000");
+        rConn.pragma("cache_size = -32000");
+        rConn.pragma("temp_store = MEMORY");
+        rConn.pragma("mmap_size = 1073741824");
+        this.readPool.push(rConn);
+        if (labelPath !== ":memory:") {
+          const rLabels = new sqlite_default(labelPath, { readonly: true });
+          rLabels.pragma("busy_timeout = 5000");
+          rLabels.pragma("cache_size = -16000");
+          rLabels.pragma("temp_store = MEMORY");
+          rLabels.pragma("mmap_size = 536870912");
+          this.labelsReadPool.push(rLabels);
+        }
+      }
+    }
+  }
+  /**
+   * Returns the next read-only connection from the pool (round-robin).
+   * Falls back to the main writer connection when the pool is empty
+   * (e.g. :memory: databases used in write-only mode).
+   *
+   * Tool handlers should use this instead of accessing `db` directly
+   * to benefit from read-pool parallelism and per-connection stmt caching.
+   */
+  getReadDb() {
+    if (this.readPool.length === 0) return this.db;
+    return this.readPool[this.readPoolRR++ % this.readPool.length];
+  }
+  /**
+   * Close and drain all read-pool connections.
+   * Must be called before setting locking_mode = EXCLUSIVE on the writer
+   * connection (e.g. in build scripts) — SQLite cannot grant EXCLUSIVE while
+   * any other connection (even read-only, even in-process) holds a shared lock.
+   */
+  closeReadPool() {
+    for (const conn of this.readPool) {
+      try {
+        conn.close();
+      } catch {
+      }
+    }
+    this.readPool = [];
+    for (const conn of this.labelsReadPool) {
+      try {
+        conn.close();
+      } catch {
+      }
+    }
+    this.labelsReadPool = [];
+    this.readPoolRR = 0;
+  }
+  /**
+   * Get (or lazily prepare) a statement on a specific connection.
+   * Uses the per-connection WeakMap cache so statements are never shared
+   * across connections.
+   *
+   * Tool handlers should use `getReadStmt(index.getReadDb(), key, () => sql)`
+   * for repeated queries — avoids re-preparing the same SQL on every call.
+   */
+  getReadStmt(db, key, buildSql) {
+    let cache = this.perConnStmtCache.get(db);
+    if (!cache) {
+      cache = /* @__PURE__ */ new Map();
+      this.perConnStmtCache.set(db, cache);
+    }
+    let stmt = cache.get(key);
+    if (!stmt) {
+      stmt = db.prepare(buildSql());
+      cache.set(key, stmt);
+    }
+    return stmt;
+  }
+  /**
+   * Run post-build maintenance tasks: ANALYZE + optimize.
+   * Call this at the END of build scripts (after all data is loaded and WAL mode is set).
+   * Do NOT call from the production server startup — the pre-built DB already has stats.
+   */
+  runPostBuildTasks() {
+    log.step("Running post-build database optimization (ANALYZE + optimize)...");
+    const start = Date.now();
+    try {
+      this.db.pragma("analysis_limit = 1000");
+      this.db.exec("ANALYZE");
+      this.db.pragma("optimize");
+      this.labelsDb.pragma("analysis_limit = 1000");
+      this.labelsDb.exec("ANALYZE");
+      this.labelsDb.pragma("optimize");
+      const elapsed = ((Date.now() - start) / 1e3).toFixed(2);
+      log.ok(`Post-build optimization complete in ${elapsed}s`);
+    } catch (e) {
+      log.warn(`Post-build optimization failed (non-fatal): ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  /**
+   * Convert database row to XppSymbol with enhanced metadata
+   */
+  rowToSymbol(row) {
+    return {
+      name: row.name,
+      type: row.type,
+      parentName: row.parent_name || void 0,
+      signature: row.signature || void 0,
+      filePath: row.file_path,
+      model: row.model,
+      packageName: row.package_name || row.model,
+      description: row.description || void 0,
+      tags: row.tags || void 0,
+      sourceSnippet: row.source_snippet || void 0,
+      complexity: row.complexity || void 0,
+      usedTypes: row.used_types || void 0,
+      methodCalls: row.method_calls || void 0,
+      inlineComments: row.inline_comments || void 0,
+      extendsClass: row.extends_class || void 0,
+      implementsInterfaces: row.implements_interfaces || void 0,
+      visibility: row.visibility || void 0,
+      usageExample: row.usage_example || void 0,
+      usageFrequency: row.usage_frequency || void 0,
+      patternType: row.pattern_type || void 0,
+      typicalUsages: row.typical_usages || void 0,
+      calledByCount: row.called_by_count || void 0,
+      relatedMethods: row.related_methods || void 0,
+      apiPatterns: row.api_patterns || void 0
+    };
+  }
+  initializeDatabase() {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS symbols (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        parent_name TEXT,
+        signature TEXT,
+        file_path TEXT NOT NULL,
+        model TEXT NOT NULL,
+        package_name TEXT,
+        description TEXT,
+        tags TEXT,
+        source_snippet TEXT,
+        source TEXT,
+        complexity INTEGER,
+        used_types TEXT,
+        method_calls TEXT,
+        inline_comments TEXT,
+        extends_class TEXT,
+        implements_interfaces TEXT,
+        visibility TEXT,
+        usage_example TEXT,
+        usage_frequency INTEGER DEFAULT 0,
+        pattern_type TEXT,
+        typical_usages TEXT,
+        called_by_count INTEGER DEFAULT 0,
+        related_methods TEXT,
+        api_patterns TEXT
+      );
+    `);
+    {
+      const existingCols = new Set(
+        this.db.pragma("table_info(symbols)").map((r) => r.name)
+      );
+      const newCols = [
+        ["package_name", "TEXT"],
+        ["description", "TEXT"],
+        ["tags", "TEXT"],
+        ["source_snippet", "TEXT"],
+        ["source", "TEXT"],
+        ["complexity", "INTEGER"],
+        ["used_types", "TEXT"],
+        ["method_calls", "TEXT"],
+        ["inline_comments", "TEXT"],
+        ["extends_class", "TEXT"],
+        ["implements_interfaces", "TEXT"],
+        // Additive, like every column above it: a database built before this
+        // gets it as NULL and the readers omit the line until a re-index fills
+        // it, rather than being forced into a rebuild (#902).
+        ["visibility", "TEXT"],
+        ["usage_example", "TEXT"],
+        ["usage_frequency", "INTEGER DEFAULT 0"],
+        ["pattern_type", "TEXT"],
+        ["typical_usages", "TEXT"],
+        ["called_by_count", "INTEGER DEFAULT 0"],
+        ["related_methods", "TEXT"],
+        ["api_patterns", "TEXT"]
+      ];
+      const allowedColNames = new Set(newCols.map(([col]) => col));
+      const allowedColTypePat = /^(TEXT|INTEGER|INTEGER DEFAULT \d+)$/;
+      for (const [col, def] of newCols) {
+        if (!existingCols.has(col)) {
+          if (!allowedColNames.has(col) || !allowedColTypePat.test(def)) {
+            throw new Error(`symbolIndex: unexpected column definition: "${col} ${def}"`);
+          }
+          this.db.exec(`ALTER TABLE symbols ADD COLUMN ${col} ${def};`);
+        }
+      }
+    }
+    this.db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
+        name,
+        type,
+        parent_name,
+        signature,
+        description,
+        tags,
+        source_snippet,
+        inline_comments,
+        content='symbols',
+        content_rowid='id'
+      );
+    `);
+    this.createFTSTriggers();
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+      CREATE INDEX IF NOT EXISTS idx_symbols_type ON symbols(type);
+      CREATE INDEX IF NOT EXISTS idx_symbols_model ON symbols(model);
+      CREATE INDEX IF NOT EXISTS idx_symbols_pattern_type ON symbols(pattern_type);
+      CREATE INDEX IF NOT EXISTS idx_symbols_parent_name ON symbols(parent_name);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_symbols_unique 
+        ON symbols(name, type, COALESCE(parent_name, ''), model);
+      
+      -- Composite indexes for common query patterns (major speed boost)
+      CREATE INDEX IF NOT EXISTS idx_type_parent ON symbols(type, parent_name) WHERE parent_name IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_type_name ON symbols(type, name);
+      CREATE INDEX IF NOT EXISTS idx_parent_type ON symbols(parent_name, type) WHERE parent_name IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_name_type ON symbols(name, type);
+      -- Covering index for field/method lookups by parent (avoids table access)
+      CREATE INDEX IF NOT EXISTS idx_parent_type_name ON symbols(parent_name, type, name) WHERE parent_name IS NOT NULL;
+      -- Index for extends_class lookups (CoC extension discovery)
+      CREATE INDEX IF NOT EXISTS idx_extends_class ON symbols(extends_class) WHERE extends_class IS NOT NULL;
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS code_patterns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pattern_name TEXT NOT NULL UNIQUE,
+        pattern_type TEXT NOT NULL,
+        common_methods TEXT,
+        dependencies TEXT,
+        usage_examples TEXT,
+        frequency INTEGER DEFAULT 0,
+        domain TEXT,
+        characteristics TEXT
+      );
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_patterns_type ON code_patterns(pattern_type);
+      CREATE INDEX IF NOT EXISTS idx_patterns_domain ON code_patterns(domain);
+    `);
+    this.labelsDb.exec(`
+      CREATE TABLE IF NOT EXISTS label_files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_path TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_label_files_path ON label_files(file_path);
+      -- removeLabelsByFile compares COLLATE NOCASE (Windows paths differ only in case
+      -- between the indexer and a tool argument), and SQLite only uses an index whose
+      -- collation matches the comparison.
+      CREATE INDEX IF NOT EXISTS idx_label_files_path_nocase
+        ON label_files(file_path COLLATE NOCASE);
+    `);
+    this.labelsDb.exec(`
+      CREATE TABLE IF NOT EXISTS labels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        label_id TEXT NOT NULL,
+        label_file_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        language TEXT NOT NULL,
+        text TEXT NOT NULL,
+        comment TEXT,
+        file_path_id INTEGER NOT NULL
+      );
+    `);
+    this.labelsDb.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_labels_unique
+        ON labels(label_id, label_file_id, model, language);
+    `);
+    this.labelsDb.exec(_XppSymbolIndex.LABEL_SECONDARY_INDEX_SQL);
+    this.labelsDb.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS labels_fts USING fts5(
+        label_id,
+        text,
+        comment,
+        content='labels',
+        content_rowid='id'
+      );
+    `);
+    this.createLabelsFtsTriggers();
+    this.migrateLabelsFtsLanguageCoverage();
+    this.migrateLabelPathsToLabelFiles();
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS table_relations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_table TEXT NOT NULL,
+        target_table TEXT NOT NULL,
+        relation_name TEXT NOT NULL,
+        constraint_fields TEXT,
+        model TEXT NOT NULL
+      );
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_table_relations_source ON table_relations(source_table);
+      CREATE INDEX IF NOT EXISTS idx_table_relations_target ON table_relations(target_table);
+      CREATE INDEX IF NOT EXISTS idx_table_relations_model ON table_relations(model);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS form_datasources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        form_name TEXT NOT NULL,
+        datasource_name TEXT NOT NULL,
+        table_name TEXT NOT NULL,
+        allow_edit INTEGER DEFAULT 1,
+        allow_create INTEGER DEFAULT 1,
+        allow_delete INTEGER DEFAULT 1,
+        model TEXT NOT NULL
+      );
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_form_datasources_form ON form_datasources(form_name);
+      CREATE INDEX IF NOT EXISTS idx_form_datasources_table ON form_datasources(table_name);
+      CREATE INDEX IF NOT EXISTS idx_form_datasources_model ON form_datasources(model);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS form_patterns (
+        form_name TEXT NOT NULL,
+        model TEXT NOT NULL,
+        node_path TEXT NOT NULL,
+        control_name TEXT NOT NULL DEFAULT '',
+        control_type TEXT NOT NULL DEFAULT '',
+        pattern TEXT NOT NULL,
+        pattern_version TEXT,
+        child_sequence TEXT,
+        PRIMARY KEY (form_name, node_path)
+      );
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_form_patterns_pattern ON form_patterns(pattern, pattern_version);
+      CREATE INDEX IF NOT EXISTS idx_form_patterns_model ON form_patterns(model);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS edt_metadata (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        edt_name TEXT NOT NULL,
+        extends TEXT,
+        enum_type TEXT,
+        reference_table TEXT,
+        relation_type TEXT,
+        string_size TEXT,
+        database_string_size TEXT,
+        display_length TEXT,
+        label TEXT,
+        model TEXT NOT NULL
+      );
+    `);
+    {
+      const existingCols = new Set(
+        this.db.pragma("table_info(edt_metadata)").map((r) => r.name)
+      );
+      if (!existingCols.has("database_string_size")) {
+        this.db.exec(`ALTER TABLE edt_metadata ADD COLUMN database_string_size TEXT;`);
+      }
+    }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_edt_metadata_name ON edt_metadata(edt_name);
+      CREATE INDEX IF NOT EXISTS idx_edt_metadata_extends ON edt_metadata(extends);
+      CREATE INDEX IF NOT EXISTS idx_edt_metadata_enum ON edt_metadata(enum_type);
+      CREATE INDEX IF NOT EXISTS idx_edt_metadata_ref_table ON edt_metadata(reference_table);
+      CREATE INDEX IF NOT EXISTS idx_edt_metadata_model ON edt_metadata(model);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_edt_metadata_unique ON edt_metadata(edt_name, model);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS security_privilege_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        privilege_name TEXT NOT NULL,
+        entry_point_name TEXT NOT NULL,
+        object_type TEXT NOT NULL,
+        access_level TEXT NOT NULL,
+        model TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_spe_privilege ON security_privilege_entries(privilege_name);
+      CREATE INDEX IF NOT EXISTS idx_spe_entry ON security_privilege_entries(entry_point_name);
+      CREATE INDEX IF NOT EXISTS idx_spe_model ON security_privilege_entries(model);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS security_duty_privileges (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        duty_name TEXT NOT NULL,
+        privilege_name TEXT NOT NULL,
+        model TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sdp_duty ON security_duty_privileges(duty_name);
+      CREATE INDEX IF NOT EXISTS idx_sdp_privilege ON security_duty_privileges(privilege_name);
+      CREATE INDEX IF NOT EXISTS idx_sdp_model ON security_duty_privileges(model);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS security_role_duties (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        role_name TEXT NOT NULL,
+        duty_name TEXT NOT NULL,
+        model TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_srd_role ON security_role_duties(role_name);
+      CREATE INDEX IF NOT EXISTS idx_srd_duty ON security_role_duties(duty_name);
+      CREATE INDEX IF NOT EXISTS idx_srd_model ON security_role_duties(model);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS menu_item_targets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        menu_item_name TEXT NOT NULL,
+        menu_item_type TEXT NOT NULL,
+        target_object TEXT,
+        target_type TEXT,
+        security_privilege TEXT,
+        label TEXT,
+        model TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_mit_name ON menu_item_targets(menu_item_name);
+      CREATE INDEX IF NOT EXISTS idx_mit_target ON menu_item_targets(target_object);
+      CREATE INDEX IF NOT EXISTS idx_mit_model ON menu_item_targets(model);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS _index_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS property_stats (
+        node_type TEXT NOT NULL,
+        property TEXT NOT NULL,
+        value TEXT NOT NULL,
+        model TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (node_type, property, value, model)
+      );
+      CREATE INDEX IF NOT EXISTS idx_ps_node_prop ON property_stats(node_type, property);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS extension_metadata (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        extension_name TEXT NOT NULL,
+        extension_type TEXT NOT NULL,
+        base_object_name TEXT NOT NULL,
+        added_fields TEXT,
+        added_methods TEXT,
+        added_indexes TEXT,
+        coc_methods TEXT,
+        event_subscriptions TEXT,
+        model TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_em_base ON extension_metadata(base_object_name);
+      CREATE INDEX IF NOT EXISTS idx_em_type ON extension_metadata(extension_type);
+      CREATE INDEX IF NOT EXISTS idx_em_name ON extension_metadata(extension_name);
+      CREATE INDEX IF NOT EXISTS idx_em_model ON extension_metadata(model);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS service_operations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        service_name TEXT NOT NULL,
+        operation_name TEXT NOT NULL,
+        method_name TEXT NOT NULL,
+        idempotent INTEGER NOT NULL DEFAULT 0,
+        model TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_so_service ON service_operations(service_name);
+      CREATE INDEX IF NOT EXISTS idx_so_model ON service_operations(model);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS service_group_members (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_name TEXT NOT NULL,
+        service_name TEXT NOT NULL,
+        model TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sgm_group ON service_group_members(group_name);
+      CREATE INDEX IF NOT EXISTS idx_sgm_service ON service_group_members(service_name);
+      CREATE INDEX IF NOT EXISTS idx_sgm_model ON service_group_members(model);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS map_mappings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        map_name TEXT NOT NULL,
+        mapping_table TEXT NOT NULL,
+        field_connections INTEGER NOT NULL DEFAULT 0,
+        model TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_mm_map ON map_mappings(map_name);
+      CREATE INDEX IF NOT EXISTS idx_mm_table ON map_mappings(mapping_table);
+      CREATE INDEX IF NOT EXISTS idx_mm_model ON map_mappings(model);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS security_policies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        policy_name TEXT NOT NULL,
+        primary_table TEXT,
+        query_name TEXT,
+        operation TEXT,
+        constrained_table INTEGER NOT NULL DEFAULT 0,
+        label TEXT,
+        model TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sp_policy ON security_policies(policy_name);
+      CREATE INDEX IF NOT EXISTS idx_sp_table ON security_policies(primary_table);
+      CREATE INDEX IF NOT EXISTS idx_sp_model ON security_policies(model);
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS macro_defines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        macro_name TEXT NOT NULL,
+        define_name TEXT NOT NULL,
+        define_value TEXT,
+        model TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_md_macro ON macro_defines(macro_name);
+      CREATE INDEX IF NOT EXISTS idx_md_define ON macro_defines(define_name);
+      CREATE INDEX IF NOT EXISTS idx_md_model ON macro_defines(model);
+    `);
+    this.ensureFilePathIndexes();
+  }
+  /**
+   * The `labels` indexes that exist purely to accelerate reads, keyed by name so
+   * they can be dropped for a bulk load and rebuilt afterwards.
+   *
+   * `idx_labels_unique` is NOT in here — it enforces the dedupe that
+   * INSERT OR REPLACE relies on and has to stay live through the load.
+   *
+   * The two file_path entries are also created on demand by ensureFilePathIndexes()
+   * (which adds the large-DB worker dispatch that startup needs); this list is the
+   * single definition of their SQL so the two paths cannot drift apart.
+   */
+  static LABEL_SECONDARY_INDEXES = [
+    { name: "idx_labels_id", sql: "CREATE INDEX IF NOT EXISTS idx_labels_id ON labels(label_id);" },
+    { name: "idx_labels_file_id", sql: "CREATE INDEX IF NOT EXISTS idx_labels_file_id ON labels(label_file_id);" },
+    { name: "idx_labels_model", sql: "CREATE INDEX IF NOT EXISTS idx_labels_model ON labels(model);" },
+    // Every language comparison in this file is LOWER(language) = LOWER(?), because
+    // Microsoft packages unzipped on Linux store 'en-us' while custom packages write
+    // 'en-US'. A plain index on language cannot serve that predicate, so the LIKE
+    // fallback degraded to a scan of all four locales instead of one.
+    //
+    // There is deliberately no plain idx_labels_language beside it: no query in this
+    // file compares language for equality — the three that mention it at all only
+    // ORDER BY / GROUP_CONCAT it, after filtering on label_id or label_file_id — so
+    // it was a B-tree maintained on every insert and read by nothing.
+    {
+      name: "idx_labels_language_lower",
+      sql: "CREATE INDEX IF NOT EXISTS idx_labels_language_lower ON labels(LOWER(language));"
+    },
+    {
+      name: "idx_labels_file_path_id",
+      sql: "CREATE INDEX IF NOT EXISTS idx_labels_file_path_id ON labels(file_path_id);"
+    }
+  ];
+  /** The subset created at schema-init time; the file_path_id index is left to ensureFilePathIndexes(). */
+  static LABEL_SECONDARY_INDEX_SQL = _XppSymbolIndex.LABEL_SECONDARY_INDEXES.filter((i) => i.name !== "idx_labels_file_path_id").map((i) => i.sql).join("\n");
+  /**
+   * Drop the read-only `labels` indexes ahead of a bulk load, and report which ones
+   * were actually there so the caller can put back exactly that set.
+   *
+   * Every row of a bulk load otherwise maintains eight B-trees, two of them keyed on
+   * a ~130-character absolute path. Measured on a 400 K-row / 150-model reproduction
+   * of this exact write path: 17.2 s with the indexes live versus 10.6 s dropping
+   * these seven and rebuilding them at the end (the insert itself, 14.9 s → 4.4 s).
+   * This is the same trade the symbols side already makes in ensureFilePathIndexes().
+   *
+   * Build-time only. Do NOT call this on a server that is answering queries — label
+   * search degrades to a full scan until createLabelSecondaryIndexes() finishes.
+   */
+  dropLabelSecondaryIndexes() {
+    const dropped = [];
+    for (const { name } of _XppSymbolIndex.LABEL_SECONDARY_INDEXES) {
+      const exists = this.labelsDb.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?`).get(name);
+      if (!exists) continue;
+      this.labelsDb.exec(`DROP INDEX IF EXISTS ${name}`);
+      dropped.push(name);
+    }
+    return dropped;
+  }
+  /**
+   * Rebuild the indexes dropped by dropLabelSecondaryIndexes().
+   *
+   * Pass the array that call returned to restore exactly the set that was there;
+   * omit it to create all of them. Returns the elapsed milliseconds so build scripts
+   * can report the cost they moved out of the insert loop.
+   */
+  createLabelSecondaryIndexes(only) {
+    const wanted = only ? new Set(only) : null;
+    const started = Date.now();
+    for (const { name, sql } of _XppSymbolIndex.LABEL_SECONDARY_INDEXES) {
+      if (wanted && !wanted.has(name)) continue;
+      this.labelsDb.exec(sql);
+    }
+    return Date.now() - started;
+  }
+  /**
+   * Index `symbols.file_path` and `labels.file_path`.
+   *
+   * Both are the lookup key of removeSymbolsByFile()/removeLabelsByFile(), which
+   * every update_symbol_index, undo_last_modification and resync runs first.
+   * Unindexed, each of those calls scans the entire table — measured on the 2 GB
+   * production DB at 319 s (the SELECT of object names) + 173 s (the DELETE) for
+   * indexing a SINGLE new object, versus 0 ms once the index exists. That is why
+   * indexing one freshly created object cost as much as a rebuild.
+   *
+   * Deliberately not part of the CREATE INDEX block above. node:sqlite is
+   * synchronous, and building this index over an already-populated production
+   * table takes ~8 s, so doing it inline would block the event loop for the whole
+   * of startup — the failure mode that makes MCP clients time out and kill the
+   * server. On an empty or small DB (a fresh build, the test suite, :memory:) the
+   * build is instant and runs here; on a large existing DB it is handed to a
+   * worker thread, and until it finishes those deletes simply stay as slow as
+   * they are today.
+   */
+  ensureFilePathIndexes() {
+    const missing = (db, indexName) => !db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?`).get(indexName);
+    const isLarge = (dbFile) => {
+      if (dbFile === ":memory:") return false;
+      try {
+        return fs2.statSync(dbFile).size > 200 * 1024 * 1024;
+      } catch {
+        return false;
+      }
+    };
+    const labelsPath = this.labelsDbPath;
+    const work = [];
+    if (missing(this.db, "idx_symbols_file_path")) {
+      work.push({
+        db: this.db,
+        dbFile: this.dbPath,
+        name: "idx_symbols_file_path",
+        sql: "CREATE INDEX IF NOT EXISTS idx_symbols_file_path ON symbols(file_path);"
+      });
+    }
+    if (missing(this.labelsDb, "idx_labels_file_path_id")) {
+      work.push({
+        db: this.labelsDb,
+        dbFile: labelsPath,
+        name: "idx_labels_file_path_id",
+        sql: "CREATE INDEX IF NOT EXISTS idx_labels_file_path_id ON labels(file_path_id);"
+      });
+    }
+    if (missing(this.db, "idx_symbols_file_path_nocase")) {
+      work.push({
+        db: this.db,
+        dbFile: this.dbPath,
+        name: "idx_symbols_file_path_nocase",
+        sql: "CREATE INDEX IF NOT EXISTS idx_symbols_file_path_nocase ON symbols(file_path COLLATE NOCASE);"
+      });
+    }
+    for (const item of work) {
+      if (isLarge(item.dbFile)) {
+        this.buildIndexInWorker(item.dbFile, item.sql, item.name);
+      } else {
+        item.db.exec(item.sql);
+      }
+    }
+  }
+  /**
+   * Build one index on a separate thread so the main event loop keeps serving.
+   * WAL mode allows the worker's write to proceed alongside main-thread readers.
+   * Best-effort: a failure leaves the index absent, which is exactly the state
+   * the server ran in before, so it is logged and never thrown.
+   */
+  buildIndexInWorker(dbPath, sql, indexName) {
+    try {
+      const worker = new Worker(new URL("./buildIndexWorker.js", import.meta.url), {
+        workerData: { dbPath, sql, indexName }
+      });
+      worker.unref();
+      worker.once("message", (msg) => {
+        if (msg.ok) {
+          console.error(`[SymbolIndex] Built ${indexName} in background (${msg.elapsedMs}ms)`);
+        } else {
+          console.error(`[SymbolIndex] Background build of ${indexName} failed: ${msg.error}`);
+        }
+        void worker.terminate();
+      });
+      worker.once("error", (e) => console.error(`[SymbolIndex] ${indexName} worker error: ${e}`));
+    } catch (e) {
+      console.error(`[SymbolIndex] Could not start ${indexName} worker: ${e}`);
+    }
+  }
+  /**
+   * Create FTS triggers for keeping symbols_fts in sync
+   * Extracted to allow disabling during bulk inserts and re-enabling after
+   *
+   * symbols_fts is an external-content table, so removals and updates MUST hand the OLD
+   * column values back to FTS5 via the 'delete' command. A plain `DELETE FROM symbols_fts`
+   * (or `UPDATE symbols_fts SET`) cannot work: the trigger runs AFTER the content row is
+   * already gone, leaving FTS5 nothing to re-derive the row's terms from — it fails with
+   * "missing row N from content table" and strands the old terms in the index.
+   *
+   * Dropped and recreated rather than CREATE-IF-NOT-EXISTS so databases still carrying the
+   * earlier (broken) definitions are repaired on the next index run.
+   */
+  createFTSTriggers() {
+    this.db.exec("DROP TRIGGER IF EXISTS symbols_ai;");
+    this.db.exec("DROP TRIGGER IF EXISTS symbols_ad;");
+    this.db.exec("DROP TRIGGER IF EXISTS symbols_au;");
+    this.db.exec(`
+      CREATE TRIGGER symbols_ai AFTER INSERT ON symbols BEGIN
+        INSERT INTO symbols_fts(rowid, name, type, parent_name, signature, description, tags, source_snippet, inline_comments)
+        VALUES (new.id, new.name, new.type, new.parent_name, new.signature, new.description, new.tags, new.source_snippet, new.inline_comments);
+      END;
+    `);
+    this.db.exec(`
+      CREATE TRIGGER symbols_ad AFTER DELETE ON symbols BEGIN
+        INSERT INTO symbols_fts(symbols_fts, rowid, name, type, parent_name, signature, description, tags, source_snippet, inline_comments)
+        VALUES ('delete', old.id, old.name, old.type, old.parent_name, old.signature, old.description, old.tags, old.source_snippet, old.inline_comments);
+      END;
+    `);
+    this.db.exec(`
+      CREATE TRIGGER symbols_au AFTER UPDATE ON symbols BEGIN
+        INSERT INTO symbols_fts(symbols_fts, rowid, name, type, parent_name, signature, description, tags, source_snippet, inline_comments)
+        VALUES ('delete', old.id, old.name, old.type, old.parent_name, old.signature, old.description, old.tags, old.source_snippet, old.inline_comments);
+        INSERT INTO symbols_fts(rowid, name, type, parent_name, signature, description, tags, source_snippet, inline_comments)
+        VALUES (new.id, new.name, new.type, new.parent_name, new.signature, new.description, new.tags, new.source_snippet, new.inline_comments);
+      END;
+    `);
+  }
+  /**
+   * (Re)create the labels_fts sync triggers — the single definition of them.
+   *
+   * There is deliberately no language filter here. The triggers used to carry
+   * `WHEN LOWER(language) = 'en-us'`, which kept the index one quarter of its size
+   * on a four-locale build but made every non-English search fall through to the
+   * LIKE scan in searchLabelsLike — measured at 152 s for a four-term `cs` query
+   * against a 1.4 M-row table, run synchronously on the event loop so the whole
+   * server stalled behind it. The rows are indexed; the space is the cheaper half
+   * of that trade. Whatever LABEL_LANGUAGES ingested is what gets tokenised, so a
+   * default en-US-only build is unaffected.
+   *
+   * Dropped and recreated (not CREATE-IF-NOT-EXISTS alone) so a database still
+   * carrying the earlier language-filtered definitions is repaired on the next open —
+   * mirrors createFTSTriggers on the symbols side.
+   */
+  createLabelsFtsTriggers() {
+    this.labelsDb.exec(`
+      DROP TRIGGER IF EXISTS labels_ai;
+      DROP TRIGGER IF EXISTS labels_ad;
+      DROP TRIGGER IF EXISTS labels_au;
+
+      CREATE TRIGGER labels_ai AFTER INSERT ON labels BEGIN
+        INSERT INTO labels_fts(rowid, label_id, text, comment)
+        VALUES (new.id, new.label_id, new.text, new.comment);
+      END;
+
+      CREATE TRIGGER labels_ad AFTER DELETE ON labels BEGIN
+        INSERT INTO labels_fts(labels_fts, rowid, label_id, text, comment)
+        VALUES ('delete', old.id, old.label_id, old.text, old.comment);
+      END;
+
+      CREATE TRIGGER labels_au AFTER UPDATE ON labels BEGIN
+        INSERT INTO labels_fts(labels_fts, rowid, label_id, text, comment)
+        VALUES ('delete', old.id, old.label_id, old.text, old.comment);
+        INSERT INTO labels_fts(rowid, label_id, text, comment)
+        VALUES (new.id, new.label_id, new.text, new.comment);
+      END;
+    `);
+  }
+  /**
+   * Databases built before labels_fts covered every language carry an index holding
+   * only en-US rows. Recreating the triggers fixes rows written from now on but
+   * cannot retroactively tokenise the ones already there, so the non-English search
+   * would stay silently empty until the next full rebuild — exactly the failure this
+   * change exists to remove.
+   *
+   * `PRAGMA user_version` on the labels DB records the coverage generation. It is 0
+   * on every database that predates this, so the one-time rebuild is self-triggering
+   * and costs nothing on an already-migrated file.
+   */
+  /**
+   * Move an existing database from the inline `labels.file_path` column to the
+   * `label_files` lookup table.
+   *
+   * Runs once, gated on `PRAGMA user_version` like the FTS coverage migration below.
+   * A database built before this carries the path spelled out on every row; the
+   * column cannot simply be dropped, because the rows have to be rewritten to point
+   * at the extracted paths instead.
+   *
+   * This is a full table rewrite, so it is minutes on a multi-GB labels database
+   * rather than the ~23 s the FTS migration costs — announced up front for the same
+   * reason: a silent stall of that length reads as a hung server. It is worth paying
+   * once. The rewritten table is less than half the size, and every full-table
+   * operation on it afterwards (FTS rebuild, ANALYZE, VACUUM, any cold-cache scan)
+   * moves proportionally less disk.
+   *
+   * Row ids are carried over deliberately: `labels_fts` is an external-content index
+   * keyed on `labels.id`, so preserving them keeps it valid. It is rebuilt at the end
+   * anyway, because the content table it points at is a different table object by then.
+   */
+  migrateLabelPathsToLabelFiles() {
+    const LABEL_FILES_NORMALISED = 2;
+    try {
+      const version = Number(this.labelsDb.pragma("user_version", { simple: true }) ?? 0);
+      if (version >= LABEL_FILES_NORMALISED) return;
+      const columns = this.labelsDb.pragma("table_info(labels)");
+      if (!columns.some((c2) => c2.name === "file_path")) {
+        this.labelsDb.pragma(`user_version = ${LABEL_FILES_NORMALISED}`);
+        return;
+      }
+      const { n } = this.labelsDb.prepare("SELECT COUNT(*) AS n FROM labels").get();
+      if (n > 0) {
+        log.detail(
+          `Normalising ${n.toLocaleString("en-US")} label file paths into label_files (one-off; several minutes on a multi-GB labels database)\u2026`
+        );
+      }
+      this.labelsDb.exec(`
+        DROP TRIGGER IF EXISTS labels_ai;
+        DROP TRIGGER IF EXISTS labels_ad;
+        DROP TRIGGER IF EXISTS labels_au;
+      `);
+      this.labelsDb.exec("BEGIN");
+      try {
+        this.labelsDb.exec(`
+          INSERT OR IGNORE INTO label_files (file_path) SELECT DISTINCT file_path FROM labels;
+
+          CREATE TABLE labels_migrated (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label_id TEXT NOT NULL,
+            label_file_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            language TEXT NOT NULL,
+            text TEXT NOT NULL,
+            comment TEXT,
+            file_path_id INTEGER NOT NULL
+          );
+
+          INSERT INTO labels_migrated (id, label_id, label_file_id, model, language, text, comment, file_path_id)
+            SELECT l.id, l.label_id, l.label_file_id, l.model, l.language, l.text, l.comment, lf.id
+            FROM labels l
+            JOIN label_files lf ON lf.file_path = l.file_path;
+
+          DROP TABLE labels;
+          ALTER TABLE labels_migrated RENAME TO labels;
+        `);
+        this.labelsDb.exec("COMMIT");
+      } catch (e) {
+        this.labelsDb.exec("ROLLBACK");
+        throw e;
+      }
+      this.labelsDb.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_labels_unique
+          ON labels(label_id, label_file_id, model, language);
+      `);
+      this.labelsDb.exec(_XppSymbolIndex.LABEL_SECONDARY_INDEX_SQL);
+      this.createLabelsFtsTriggers();
+      this.rebuildLabelsFts();
+      this.labelsDb.pragma(`user_version = ${LABEL_FILES_NORMALISED}`);
+      if (n > 0) log.detail(`Label file paths normalised (${n.toLocaleString("en-US")} rows).`);
+    } catch (e) {
+      console.error(`[SymbolIndex] label_files migration failed, will retry on next open: ${e}`);
+      try {
+        this.createLabelsFtsTriggers();
+      } catch {
+      }
+    }
+  }
+  migrateLabelsFtsLanguageCoverage() {
+    const LABELS_FTS_ALL_LANGUAGES = 1;
+    try {
+      const version = Number(this.labelsDb.pragma("user_version", { simple: true }) ?? 0);
+      if (version >= LABELS_FTS_ALL_LANGUAGES) return;
+      const legacyPathColumn = this.labelsDb.pragma("table_info(labels)").some((c2) => c2.name === "file_path");
+      if (legacyPathColumn) {
+        this.labelsDb.pragma(`user_version = ${LABELS_FTS_ALL_LANGUAGES}`);
+        return;
+      }
+      const { n } = this.labelsDb.prepare("SELECT COUNT(*) AS n FROM labels").get();
+      if (n > 0) {
+        log.detail(
+          `Re-tokenising ${n.toLocaleString("en-US")} labels so every language is searchable (one-off, ~20 s)\u2026`
+        );
+        this.rebuildLabelsFts();
+      }
+      this.labelsDb.pragma(`user_version = ${LABELS_FTS_ALL_LANGUAGES}`);
+    } catch (e) {
+      console.error(`[SymbolIndex] labels_fts language migration skipped: ${e}`);
+    }
+  }
+  /**
+   * Add a symbol to the index with enhanced metadata
+   */
+  addSymbol(symbol) {
+    this.invalidateSymbolCounts();
+    let stmt = this.stmtCache.get("addSymbol");
+    if (!stmt) {
+      stmt = this.db.prepare(`
+        INSERT OR REPLACE INTO symbols (
+          name, type, parent_name, signature, file_path, model, package_name,
+          description, tags, source_snippet, source, complexity, used_types, method_calls,
+          inline_comments, extends_class, implements_interfaces, visibility, usage_example,
+          usage_frequency, pattern_type, typical_usages, called_by_count, related_methods, api_patterns
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      this.stmtCache.set("addSymbol", stmt);
+    }
+    stmt.run(
+      symbol.name,
+      symbol.type,
+      symbol.parentName || null,
+      symbol.signature || null,
+      symbol.filePath,
+      symbol.model,
+      symbol.packageName || symbol.model,
+      symbol.description || null,
+      symbol.tags || null,
+      symbol.sourceSnippet || null,
+      symbol.source || null,
+      symbol.complexity || null,
+      symbol.usedTypes || null,
+      symbol.methodCalls || null,
+      symbol.inlineComments || null,
+      symbol.extendsClass || null,
+      symbol.implementsInterfaces || null,
+      symbol.visibility || null,
+      symbol.usageExample || null,
+      symbol.usageFrequency || 0,
+      symbol.patternType || null,
+      symbol.typicalUsages || null,
+      symbol.calledByCount || 0,
+      symbol.relatedMethods || null,
+      symbol.apiPatterns || null
+    );
+  }
+  /**
+   * All stored forms a file path may take in the index. Full builds store the
+   * JSON's sourcePath: CI-extracted custom models normalize it to a
+   * PackagesLocalDirectory-relative forward-slash path (see normalizeSourcePath
+   * in scripts/extract-metadata.ts), while locally built DBs keep the absolute
+   * Windows path with backslashes. Matching every form keeps stale-row cleanup
+   * working regardless of which build produced the DB.
+   */
+  filePathForms(filePath) {
+    const forms = /* @__PURE__ */ new Set();
+    const addSpellings = (p) => {
+      if (!p) return;
+      forms.add(p);
+      forms.add(p.replace(/\//g, "\\"));
+      forms.add(p.replace(/\\/g, "/"));
+      const m = /[/\\]PackagesLocalDirectory[/\\](.+)$/.exec(p);
+      if (m) {
+        const tail = m[1].replace(/\\/g, "/");
+        forms.add(tail);
+        forms.add(tail.replace(/\//g, "\\"));
+      }
+    };
+    addSpellings(filePath);
+    try {
+      addSpellings(fs2.realpathSync(filePath));
+    } catch {
+    }
+    return [...forms];
+  }
+  /**
+   * Remove all symbols for a given file path from both the main table and FTS index.
+   * Matches every stored path form (see filePathForms) so stale rows are removed
+   * even when the DB stores a different path form than the caller passed.
+   *
+   * The comparison is COLLATE NOCASE because SQLite's default BINARY collation made
+   * it case-SENSITIVE against a Windows filesystem that is not: `k:\aosservice\…`
+   * from a tool argument never matched `K:\AosService\…` as stored by the indexer,
+   * so the delete reported 0 rows and every stale symbol stayed searchable. See
+   * ensureFilePathIndexes for the NOCASE index that keeps this lookup off a scan.
+   *
+   * Returns the names of top-level objects that were removed (for cache invalidation).
+   */
+  /**
+   * Top-level object names belonging to one model — the evidence from which a
+   * model's naming prefix is inferred (see utils/modelPrefixInference.ts).
+   *
+   * Deliberately narrow and bounded: only `name`, capped at `limit`. Reading whole
+   * rows here would pull source snippets across the wire and turn a 450 ms lookup
+   * into a slow one.
+   *
+   * Extension objects are included on purpose — a dot-notation extension states the
+   * model's infix outright — but `parent_name IS NULL` had been quietly excluding
+   * them, because an extension ELEMENT is stored as a child of the base object it
+   * extends. On ContosoFinanceSK that hid 34 of 36: the model spells its extensions
+   * "…ConSKExtension" 35 times and "…ConSkExtension" once, yet inference saw
+   * two names, one of each, fell under the 60 % threshold and derived "ConSk"
+   * from the regular token instead — flattening the "SK" country code. This server
+   * then WROTE a ConSk extension, which became one of the two visible names, so
+   * the wrong answer was feeding itself. Members ('method', 'field') are excluded by
+   * type, which is what this clause was reaching for.
+   *
+   * The sample is drawn in two BANDS rather than as one `LIMIT` over the union,
+   * because a model with more names than `limit` otherwise lets SQLite decide which
+   * ones inference sees — no ORDER BY means no defined subset, and inference is
+   * threshold-based (MIN_COVERAGE 60 %), so a skewed sample can flip the answer.
+   * The bands also protect the signal: extensions are rare and state the infix
+   * outright, regular objects are many and carry the leading token, and
+   * inferPrefixFromObjectNames needs BOTH — a single window ordered any way at all
+   * would let the larger band crowd the other one out entirely. Each band is capped
+   * at half the budget, gives back what it does not use, and is ordered (type, name)
+   * so the same model always yields the same sample — a silent, self-reinforcing
+   * failure otherwise, since this server writes names with the inferred prefix and
+   * those names become evidence for the next inference.
+   */
+  getModelObjectNames(model, limit = 400) {
+    if (!model) return [];
+    if (limit <= 0) return [];
+    const db = this.getReadDb();
+    const band = (extensions, cap) => {
+      if (cap <= 0) return [];
+      const rows = db.prepare(
+        `SELECT name FROM symbols
+           WHERE model = ?
+             AND type ${extensions ? "LIKE" : "NOT LIKE"} '%-extension'
+             ${extensions ? "" : "AND parent_name IS NULL"}
+             AND type NOT IN ('method', 'field')
+           ORDER BY type, name
+           LIMIT ?`
+      ).all(model, cap);
+      return rows.map((r) => r.name);
+    };
+    const half = Math.max(1, Math.ceil(limit / 2));
+    const extensionNames = band(true, half);
+    const regularNames = band(false, limit - extensionNames.length);
+    return [...extensionNames, ...regularNames];
+  }
+  removeSymbolsByFile(filePath) {
+    const forms = this.filePathForms(filePath);
+    const placeholders = forms.map(() => "?").join(", ");
+    const rows = this.db.prepare(
+      `SELECT DISTINCT name FROM symbols WHERE file_path COLLATE NOCASE IN (${placeholders}) AND parent_name IS NULL`
+    ).all(...forms);
+    const objectNames = rows.map((r) => r.name);
+    const result = this.db.prepare(`DELETE FROM symbols WHERE file_path COLLATE NOCASE IN (${placeholders})`).run(...forms);
+    this.invalidateSymbolCounts();
+    return { deletedCount: result.changes, objectNames };
+  }
+  /**
+   * Remove all labels for a given file path from the labels DB.
+   * Matches every stored path form (see filePathForms), like removeSymbolsByFile.
+   * Also cleans up the labels FTS index.
+   * Returns the count of deleted label rows.
+   */
+  removeLabelsByFile(filePath) {
+    const forms = this.filePathForms(filePath);
+    const placeholders = forms.map(() => "?").join(", ");
+    const result = this.labelsDb.prepare(
+      `DELETE FROM labels
+       WHERE file_path_id IN (
+         SELECT id FROM label_files WHERE file_path COLLATE NOCASE IN (${placeholders})
+       )`
+    ).run(...forms);
+    return result.changes;
+  }
+  /**
+   * Remove all labels matching a specific label_id + model combination.
+   * Used when a label is known to have been deleted/reverted.
+   */
+  removeLabelById(labelId, model) {
+    const result = this.labelsDb.prepare(
+      `DELETE FROM labels WHERE label_id = ? AND model = ?`
+    ).run(labelId, model);
+    return result.changes;
+  }
+  /**
+   * Sanitize a user query for FTS5 to prevent syntax errors.
+   * FTS5 operators (AND, OR, NOT, NEAR, quotes, parens, *) can crash the engine
+   * when they appear in raw user input. Wraps each token as a quoted prefix term.
+   *
+   * Performance: restricts the MATCH to the small/fast columns only.
+   * source_snippet and inline_comments hold full X++ source code (100-2000 chars per
+   * method × 300K+ methods) — including them in every FTS scan is the single biggest
+   * cause of slow symbol searches after table-method indexing was added.
+   */
+  sanitizeFtsQuery(query) {
+    const trimmed = query.trim();
+    if (!trimmed) return '""';
+    const stopWords = /* @__PURE__ */ new Set([
+      // Common query verbs (Czech)
+      "vyhledej",
+      "najdi",
+      "zobraz",
+      "uka\u017E",
+      "souvisej\xEDc\xED",
+      "proces",
+      "procesy",
+      // Common query verbs (English)  
+      "find",
+      "search",
+      "show",
+      "get",
+      "list",
+      "related",
+      "process",
+      "processes",
+      // Object type keywords (already in type parameter)
+      "method",
+      "methods",
+      "class",
+      "classes",
+      "table",
+      "tables",
+      "t\u0159\xEDdy",
+      "t\u0159\xEDda"
+    ]);
+    const cleaned = trimmed.replace(/[^\w\s]/g, " ").trim();
+    const allTokens = cleaned.split(/\s+/).map((t) => t.toLowerCase()).filter((t) => t.length > 1);
+    const withoutStopWords = allTokens.filter((t) => !stopWords.has(t));
+    const tokens = withoutStopWords.length > 0 ? withoutStopWords : allTokens;
+    if (tokens.length === 0) {
+      return `{name type parent_name signature description tags} : "${trimmed}"`;
+    }
+    const baseQuery = tokens.map((t) => `"${t}"*`).join(" ");
+    return `{name type parent_name signature description tags} : ${baseQuery}`;
+  }
+  /**
+   * Search symbols by query with full-text search
+   * PERFORMANCE: Only select essential columns (name, type, parent_name, signature, model, file_path)
+   * Uses prepared statement caching for common queries
+   */
+  searchSymbols(query, limit = 20, types) {
+    const ftsQuery = this.sanitizeFtsQuery(query);
+    const cacheKey = types?.length ? `search_typed_${types.join("_")}` : "search_all";
+    let sql = `
+      SELECT s.id, s.name, s.type, s.parent_name, s.signature, s.file_path, s.model, s.description
+      FROM symbols_fts fts
+      JOIN symbols s ON s.id = fts.rowid
+      WHERE symbols_fts MATCH ?
+    `;
+    const params = [ftsQuery];
+    if (types && types.length > 0) {
+      sql += ` AND s.type IN (${types.map(() => "?").join(",")})`;
+      params.push(...types);
+    }
+    sql += ` ORDER BY rank LIMIT ?`;
+    params.push(limit);
+    const db = this.getReadDb();
+    try {
+      const stmt = this.getReadStmt(db, cacheKey, () => sql);
+      return stmt.all(...params).map((row) => this.rowToSymbol(row));
+    } catch {
+      const fallbackCacheKey = types?.length ? `fallback_typed_${types.join("_")}` : "fallback_all";
+      let fallbackSql = `SELECT s.id, s.name, s.type, s.parent_name, s.signature, s.file_path, s.model, s.description FROM symbols s WHERE s.name LIKE ? ESCAPE '\\'`;
+      const escapeLikePattern = (value) => {
+        return value.replace(/\\/g, "\\\\").replace(/[%_]/g, "\\$&");
+      };
+      const fallbackParams = [`%${escapeLikePattern(query)}%`];
+      if (types && types.length > 0) {
+        fallbackSql += ` AND s.type IN (${types.map(() => "?").join(",")})`;
+        fallbackParams.push(...types);
+      }
+      fallbackSql += ` ORDER BY s.name LIMIT ?`;
+      fallbackParams.push(limit);
+      const fallbackStmt = this.getReadStmt(db, fallbackCacheKey, () => fallbackSql);
+      return fallbackStmt.all(...fallbackParams).map((r) => this.rowToSymbol(r));
+    }
+  }
+  /**
+   * Search symbols by prefix (for autocomplete)
+   * PERFORMANCE: Only select essential columns
+   */
+  searchByPrefix(prefix, types, limit = 20) {
+    let sql = `
+      SELECT id, name, type, parent_name, signature, file_path, model, description
+      FROM symbols
+      WHERE name LIKE ?
+    `;
+    const params = [`${prefix}%`];
+    if (types && types.length > 0) {
+      sql += ` AND type IN (${types.map(() => "?").join(",")})`;
+      params.push(...types);
+    }
+    sql += ` ORDER BY name LIMIT ?`;
+    params.push(limit);
+    const cacheKey = types?.length ? `prefix_typed_${types.join("_")}` : "prefix_all";
+    const db = this.getReadDb();
+    const stmt = this.getReadStmt(db, cacheKey, () => sql);
+    return stmt.all(...params).map((row) => this.rowToSymbol(row));
+  }
+  /**
+   * Get a specific symbol by name and type
+   */
+  getSymbolByName(name, type) {
+    const db = this.getReadDb();
+    const stmt = this.getReadStmt(
+      db,
+      "getSymbolByName",
+      () => `SELECT * FROM symbols WHERE name = ? AND type = ? LIMIT 1`
+    );
+    const row = stmt.get(name, type);
+    return row ? this.rowToSymbol(row) : null;
+  }
+  /**
+   * Get all classes (for resource listing)
+   */
+  getAllClasses() {
+    const stmt = this.getReadDb().prepare(
+      `SELECT * FROM symbols WHERE type = 'class' ORDER BY name`
+    );
+    return stmt.all().map((row) => this.rowToSymbol(row));
+  }
+  /**
+   * Get symbol count.
+   *
+   * WARNING: without a warm cache this is a full index scan — 30-60 s on a
+   * large production DB with a cold file cache, and node:sqlite blocks the
+   * event loop for the whole scan. Server request paths must use
+   * getSymbolCounts() (off-thread) or getCachedSymbolCounts() instead; the
+   * synchronous form is for build scripts and post-indexing logging where the
+   * DB is small or already hot.
+   */
+  getSymbolCount() {
+    if (this.symbolCountsCache) return this.symbolCountsCache.total;
+    const stmt = this.getReadDb().prepare("SELECT COUNT(*) as count FROM symbols");
+    return stmt.get().count;
+  }
+  /**
+   * Get symbol count by type. Same event-loop-blocking caveat as getSymbolCount().
+   */
+  getSymbolCountByType() {
+    if (this.symbolCountsCache) return this.symbolCountsCache.byType;
+    return this.computeSymbolCountsSync().byType;
+  }
+  /**
+   * Cheap emptiness probe — O(1) regardless of table size. Use this instead of
+   * getSymbolCount() === 0 on startup paths.
+   */
+  hasAnySymbols() {
+    const row = this.getReadDb().prepare("SELECT EXISTS(SELECT 1 FROM symbols) as present").get();
+    return row.present === 1;
+  }
+  /**
+   * Memoized counts if already computed this session, else null. Never scans —
+   * safe on any request path (health endpoints, status displays).
+   */
+  getCachedSymbolCounts() {
+    return this.symbolCountsCache;
+  }
+  /**
+   * Total + per-type symbol counts without blocking the event loop.
+   *
+   * The scan runs in a worker thread with its own read-only connection (WAL
+   * allows concurrent readers), so the MCP server keeps answering protocol
+   * requests while it runs. The result is memoized; concurrent callers share
+   * one in-flight computation. Falls back to a synchronous scan when the
+   * worker cannot start (:memory: DBs are per-connection and invisible to
+   * another thread; under tsx/vitest the compiled worker .js does not exist).
+   */
+  async getSymbolCounts() {
+    if (this.symbolCountsCache) return this.symbolCountsCache;
+    if (this.symbolCountsPromise) return this.symbolCountsPromise;
+    const promise = this.computeSymbolCountsInWorker().catch(() => this.computeSymbolCountsSync()).then((counts) => {
+      if (this.symbolCountsPromise === promise) {
+        this.symbolCountsCache = counts;
+      }
+      return counts;
+    });
+    this.symbolCountsPromise = promise;
+    return promise;
+  }
+  /**
+   * Drop everything memoized from the symbols table — counts and the suggestion
+   * candidate pools. Call after any write that changes symbol rows.
+   */
+  invalidateSymbolCounts() {
+    this.symbolCountsCache = null;
+    this.symbolCountsPromise = null;
+    this.suggestionNamesCache.clear();
+    this.symbolsByTermCache = null;
+  }
+  computeSymbolCountsSync() {
+    const rows = this.getReadDb().prepare(`SELECT type, COUNT(*) as count FROM symbols GROUP BY type`).all();
+    const byType = {};
+    let total = 0;
+    for (const row of rows) {
+      byType[row.type] = row.count;
+      total += row.count;
+    }
+    return { total, byType };
+  }
+  computeSymbolCountsInWorker() {
+    if (this.dbPath === ":memory:") {
+      return Promise.reject(new Error("in-memory DB is not visible to worker threads"));
+    }
+    return new Promise((resolve4, reject) => {
+      const worker = new Worker(new URL("./symbolCountsWorker.js", import.meta.url), {
+        workerData: { dbPath: this.dbPath }
+      });
+      worker.once("message", (msg) => {
+        if (msg.ok) {
+          resolve4({ total: msg.total, byType: msg.byType });
+        } else {
+          reject(new Error(msg.error));
+        }
+        void worker.terminate();
+      });
+      worker.once("error", reject);
+      worker.once("exit", (code) => reject(new Error(`counts worker exited with code ${code}`)));
+    });
+  }
+  /**
+   * Compute usage statistics (usage_frequency and called_by_count) for all methods
+   * Should be called after initial indexing is complete
+   * Optimized for 300k+ methods with minimal memory usage
+   */
+  computeUsageStatistics() {
+    log.step("Computing usage statistics...");
+    const startTime = Date.now();
+    const inCI = isCI();
+    const originalSync = this.db.pragma("synchronous", { simple: true });
+    this.db.pragma("synchronous = OFF");
+    this.db.exec(`
+      CREATE TEMP TABLE IF NOT EXISTS temp_method_calls (
+        caller_method TEXT,
+        called_method TEXT
+      );
+      DELETE FROM temp_method_calls;
+    `);
+    const allMethods = this.db.prepare(`
+      SELECT name, method_calls 
+      FROM symbols 
+      WHERE type = 'method' AND method_calls IS NOT NULL AND method_calls != ''
+    `).all();
+    log.detail(`${allMethods.length.toLocaleString("en-US")} methods with call references`);
+    if (allMethods.length === 0) {
+      log.detail("No method calls to process, skipping statistics");
+      return;
+    }
+    log.detail("Parsing and inserting method calls...");
+    const insertStmt = this.db.prepare(
+      "INSERT INTO temp_method_calls (caller_method, called_method) VALUES (?, ?)"
+    );
+    const BATCH_SIZE = 1e3;
+    const totalBatches = Math.ceil(allMethods.length / BATCH_SIZE);
+    for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
+      const batchStart = batchIdx * BATCH_SIZE;
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, allMethods.length);
+      const batchMethods = allMethods.slice(batchStart, batchEnd);
+      const insertBatch = this.db.transaction(() => {
+        for (const method of batchMethods) {
+          const calls = method.method_calls.split(",");
+          for (let i = 0; i < calls.length; i++) {
+            const calledMethod = calls[i].trim();
+            if (calledMethod) {
+              insertStmt.run(method.name, calledMethod);
+            }
+          }
+        }
+      });
+      insertBatch();
+      if ((batchIdx + 1) % Math.ceil(totalBatches / 10) === 0 || batchIdx === totalBatches - 1) {
+        const percent = Math.round((batchIdx + 1) / totalBatches * 100);
+        const text = `${percent}% (${batchEnd.toLocaleString("en-US")}/${allMethods.length.toLocaleString("en-US")} methods)`;
+        if (inCI) {
+          log.detail(text);
+        } else {
+          process.stdout.write(`\r      ${c.dim(text.padEnd(44))}`);
+        }
+      }
+      if (isCI() && global.gc && batchIdx % 10 === 0) {
+        global.gc();
+      }
+    }
+    if (!inCI) console.log("");
+    log.detail("Computing aggregated statistics...");
+    const updateTransaction = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TEMP TABLE temp_call_stats AS
+        SELECT 
+          called_method,
+          COUNT(*) as total_calls,
+          COUNT(DISTINCT caller_method) as unique_callers
+        FROM temp_method_calls
+        GROUP BY called_method;
+        
+        CREATE INDEX idx_temp_call_stats ON temp_call_stats(called_method);
+      `);
+      log.detail("Applying statistics to symbols...");
+      try {
+        if (inCI) {
+          log.detail("Updating usage_frequency and called_by_count (this may take 1-2 minutes)...");
+        }
+        this.db.exec(`
+          UPDATE symbols
+          SET 
+            usage_frequency = COALESCE((
+              SELECT total_calls 
+              FROM temp_call_stats 
+              WHERE temp_call_stats.called_method = symbols.name
+            ), 0),
+            called_by_count = COALESCE((
+              SELECT unique_callers 
+              FROM temp_call_stats 
+              WHERE temp_call_stats.called_method = symbols.name
+            ), 0)
+          WHERE type = 'method'
+            AND EXISTS (SELECT 1 FROM temp_call_stats WHERE temp_call_stats.called_method = symbols.name);
+        `);
+        if (inCI) {
+          log.detail("Setting zero counts for unused methods...");
+        }
+        this.db.exec(`
+          UPDATE symbols
+          SET usage_frequency = 0, called_by_count = 0
+          WHERE type = 'method'
+            AND NOT EXISTS (SELECT 1 FROM temp_call_stats WHERE temp_call_stats.called_method = symbols.name);
+        `);
+      } catch {
+        log.warn("Optimized UPDATE failed, using fallback method");
+        this.db.exec(`
+          UPDATE symbols
+          SET 
+            usage_frequency = COALESCE((SELECT total_calls FROM temp_call_stats WHERE called_method = symbols.name), 0),
+            called_by_count = COALESCE((SELECT unique_callers FROM temp_call_stats WHERE called_method = symbols.name), 0)
+          WHERE type = 'method';
+        `);
+      }
+      this.db.exec("DROP TABLE IF EXISTS temp_call_stats;");
+    });
+    updateTransaction();
+    this.db.exec("DROP TABLE temp_method_calls;");
+    this.db.pragma(`synchronous = ${originalSync}`);
+    const endTime = Date.now();
+    const duration = ((endTime - startTime) / 1e3).toFixed(2);
+    log.ok(`Usage statistics computed in ${duration}s`);
+  }
+  /**
+   * Index metadata from a directory.
+   *
+   * `modelNames` scopes the pass:
+   *   - omitted        → index every model directory found under `metadataPath`
+   *   - a model name   → index just that one model
+   *   - an array       → index exactly those models in a SINGLE pass
+   *
+   * Pass an array rather than calling this once per model: with the default
+   * `ftsStrategy: 'rebuild'` the FTS index is rebuilt from scratch ONCE at the end of the
+   * call, which is O(all symbols in the DB), so a per-model loop turns a scoped rebuild
+   * into N full-table rebuilds.
+   *
+   * `ftsStrategy` picks how symbols_fts is brought up to date:
+   *   - 'rebuild'     (default) drop the FTS triggers, bulk-insert, then re-tokenise the
+   *                   WHOLE symbols table. Cost is O(all symbols) regardless of scope —
+   *                   right for a full or near-full rebuild, where it beats per-row triggers.
+   *   - 'incremental' keep the FTS triggers live so only the touched rows are re-tokenised.
+   *                   Cost is O(scope). Use it when the scope is a small fraction of the
+   *                   database (a custom-model build: ~10K of ~1.2M symbols, where the full
+   *                   rebuild cost 327s against 5s of actual indexing work).
+   */
+  /**
+   * Turn a write failure inside a model transaction into an error that names
+   * the database being written and, when the drive is the likely cause, how
+   * much room is left on it.
+   *
+   * A full disk makes SQLite roll the transaction back itself, so our transaction
+   * wrapper then fails to COMMIT and the only thing the user sees is
+   * "cannot commit - no transaction is active" with a stack inside the library —
+   * no path, no mention of space. That message sent at least one user hunting
+   * for a corrupt index when the index was simply being written to the wrong
+   * (and nearly full) drive.
+   */
+  describeWriteFailure(err, model) {
+    const original = err instanceof Error ? err : new Error(String(err));
+    const message = original.message;
+    const diskRelated = /disk is full|SQLITE_FULL|disk I\/O error|no transaction is active/i.test(message);
+    if (!diskRelated) return original;
+    let space = "";
+    try {
+      const stat = fs2.statfsSync(path.dirname(path.resolve(this.dbPath)));
+      const freeGb = Number(stat.bavail) * Number(stat.bsize) / 1024 ** 3;
+      space = ` (${freeGb.toFixed(1)} GB free there)`;
+    } catch {
+    }
+    const wrapped = new Error(
+      `Writing model '${model}' to ${this.dbPath} failed: ${message}
+The index is written to that path${space}. A full disk makes SQLite roll the write back on its own, which is what surfaces as "cannot commit - no transaction is active".
+Point the installation at a drive with room (a full index needs several GB): re-run 'd365fo-mcp setup' and choose another directory, or set index.dbPath / index.metadataPath in d365fo-mcp.json.`
+    );
+    wrapped.cause = original;
+    return wrapped;
+  }
+  async indexMetadataDirectory(metadataPath, modelNames, opts) {
+    const skipFts = process.env.SKIP_FTS === "true";
+    const resumable = process.env.RESUME === "true";
+    const incrementalFts = opts?.ftsStrategy === "incremental" && modelNames !== void 0 && !skipFts;
+    const requested = modelNames === void 0 ? void 0 : Array.isArray(modelNames) ? modelNames : [modelNames];
+    const allModels = requested ?? await this.getModelDirectories(metadataPath);
+    let models = allModels;
+    if (allModels.length > 1) {
+      log.detail(`Scanning ${allModels.length} model(s) to determine build order...`);
+      models = this.sortModelsBySize(metadataPath, allModels);
+      log.detail(`Build order determined (largest model first: ${models[0] ?? "\u2014"})`);
+    }
+    if (resumable) {
+      const done = this.getIndexedModels();
+      const skipped = models.filter((m) => done.has(m));
+      models = models.filter((m) => !done.has(m));
+      if (skipped.length > 0) {
+        log.detail(`Resuming build: skipping ${skipped.length} already-indexed model(s)`);
+      }
+    }
+    const startTime = Date.now();
+    if (incrementalFts) {
+      this.createFTSTriggers();
+      this.db.pragma("recursive_triggers = ON");
+    } else {
+      this.db.exec("DROP TRIGGER IF EXISTS symbols_ai;");
+      this.db.exec("DROP TRIGGER IF EXISTS symbols_au;");
+      this.db.exec("DROP TRIGGER IF EXISTS symbols_ad;");
+    }
+    const markProgress = resumable ? this.db.prepare(`INSERT OR REPLACE INTO _build_progress (model, indexed_at) VALUES (?, ?)`) : null;
+    let modelIndex = 0;
+    for (const model of models) {
+      modelIndex++;
+      const modelPath = path.join(metadataPath, model);
+      const modelStartTime = Date.now();
+      const progressPercent = (modelIndex / models.length * 100).toFixed(0);
+      if (isCI()) {
+        log.detail(`[${progressPercent}%] indexing ${model}...`);
+      } else {
+        process.stdout.write(`\r      ${c.dim(`[${progressPercent}%]`)} ${model.padEnd(40)} ${c.dim("indexing...")}`);
+      }
+      const tx = this.db.transaction(() => {
+        const classesPath = path.join(modelPath, "classes");
+        if (fs2.existsSync(classesPath)) this.indexClasses(classesPath, model);
+        const tablesPath = path.join(modelPath, "tables");
+        if (fs2.existsSync(tablesPath)) this.indexTables(tablesPath, model);
+        const formsPath = path.join(modelPath, "forms");
+        if (fs2.existsSync(formsPath)) this.indexForms(formsPath, model);
+        const queriesPath = path.join(modelPath, "queries");
+        if (fs2.existsSync(queriesPath)) this.indexQueries(queriesPath, model);
+        const viewsPath = path.join(modelPath, "views");
+        if (fs2.existsSync(viewsPath)) this.indexViews(viewsPath, model);
+        const enumsPath = path.join(modelPath, "enums");
+        if (fs2.existsSync(enumsPath)) this.indexEnums(enumsPath, model);
+        const edtsPath = path.join(modelPath, "edts");
+        if (fs2.existsSync(edtsPath)) this.indexEdts(edtsPath, model);
+        const reportsPath = path.join(modelPath, "reports");
+        if (fs2.existsSync(reportsPath)) this.indexReports(reportsPath, model);
+        const secPrivPath = path.join(modelPath, "security-privileges");
+        if (fs2.existsSync(secPrivPath)) this.indexSecurityPrivileges(secPrivPath, model);
+        const secDutyPath = path.join(modelPath, "security-duties");
+        if (fs2.existsSync(secDutyPath)) this.indexSecurityDuties(secDutyPath, model);
+        const secRolePath = path.join(modelPath, "security-roles");
+        if (fs2.existsSync(secRolePath)) this.indexSecurityRoles(secRolePath, model);
+        const menuDisplayPath = path.join(modelPath, "menu-item-displays");
+        if (fs2.existsSync(menuDisplayPath)) this.indexMenuItems(menuDisplayPath, model, "display");
+        const menuActionPath = path.join(modelPath, "menu-item-actions");
+        if (fs2.existsSync(menuActionPath)) this.indexMenuItems(menuActionPath, model, "action");
+        const menuOutputPath = path.join(modelPath, "menu-item-outputs");
+        if (fs2.existsSync(menuOutputPath)) this.indexMenuItems(menuOutputPath, model, "output");
+        const tableExtPath = path.join(modelPath, "table-extensions");
+        if (fs2.existsSync(tableExtPath)) this.indexExtensions(tableExtPath, model, "table-extension");
+        const classExtPath = path.join(modelPath, "class-extensions");
+        if (fs2.existsSync(classExtPath)) this.indexExtensions(classExtPath, model, "class-extension");
+        const formExtPath = path.join(modelPath, "form-extensions");
+        if (fs2.existsSync(formExtPath)) this.indexExtensions(formExtPath, model, "form-extension");
+        const enumExtPath = path.join(modelPath, "enum-extensions");
+        if (fs2.existsSync(enumExtPath)) this.indexExtensions(enumExtPath, model, "enum-extension");
+        const edtExtPath = path.join(modelPath, "edt-extensions");
+        if (fs2.existsSync(edtExtPath)) this.indexExtensions(edtExtPath, model, "edt-extension");
+        const deExtPath = path.join(modelPath, "data-entity-extensions");
+        if (fs2.existsSync(deExtPath)) this.indexExtensions(deExtPath, model, "data-entity-extension");
+        const viewExtPath = path.join(modelPath, "view-extensions");
+        if (fs2.existsSync(viewExtPath)) this.indexExtensions(viewExtPath, model, "view-extension");
+        const queryExtPath = path.join(modelPath, "query-extensions");
+        if (fs2.existsSync(queryExtPath)) this.indexExtensions(queryExtPath, model, "query-extension");
+        const mapExtPath = path.join(modelPath, "map-extensions");
+        if (fs2.existsSync(mapExtPath)) this.indexExtensions(mapExtPath, model, "map-extension");
+        const menuExtPath = path.join(modelPath, "menu-extensions");
+        if (fs2.existsSync(menuExtPath)) this.indexExtensions(menuExtPath, model, "menu-extension");
+        const secDutyExtPath = path.join(modelPath, "security-duty-extensions");
+        if (fs2.existsSync(secDutyExtPath)) this.indexExtensions(secDutyExtPath, model, "security-duty-extension");
+        const secRoleExtPath = path.join(modelPath, "security-role-extensions");
+        if (fs2.existsSync(secRoleExtPath)) this.indexExtensions(secRoleExtPath, model, "security-role-extension");
+        const miDisplayExtPath = path.join(modelPath, "menu-item-display-extensions");
+        if (fs2.existsSync(miDisplayExtPath)) this.indexExtensions(miDisplayExtPath, model, "menu-item-display-extension");
+        const miActionExtPath = path.join(modelPath, "menu-item-action-extensions");
+        if (fs2.existsSync(miActionExtPath)) this.indexExtensions(miActionExtPath, model, "menu-item-action-extension");
+        const miOutputExtPath = path.join(modelPath, "menu-item-output-extensions");
+        if (fs2.existsSync(miOutputExtPath)) this.indexExtensions(miOutputExtPath, model, "menu-item-output-extension");
+        const servicesPath = path.join(modelPath, "services");
+        if (fs2.existsSync(servicesPath)) this.indexServices(servicesPath, model);
+        const serviceGroupsPath = path.join(modelPath, "service-groups");
+        if (fs2.existsSync(serviceGroupsPath)) this.indexServiceGroups(serviceGroupsPath, model);
+        const mapsPath = path.join(modelPath, "maps");
+        if (fs2.existsSync(mapsPath)) this.indexMaps(mapsPath, model);
+        const configKeysPath = path.join(modelPath, "configuration-keys");
+        if (fs2.existsSync(configKeysPath)) this.indexConfigurationKeys(configKeysPath, model);
+        const licenseCodesPath = path.join(modelPath, "license-codes");
+        if (fs2.existsSync(licenseCodesPath)) this.indexLicenseCodes(licenseCodesPath, model);
+        const securityPoliciesPath = path.join(modelPath, "security-policies");
+        if (fs2.existsSync(securityPoliciesPath)) this.indexSecurityPolicies(securityPoliciesPath, model);
+        const macrosPath = path.join(modelPath, "macros");
+        if (fs2.existsSync(macrosPath)) this.indexMacros(macrosPath, model);
+        this.flushPropertyStats();
+        markProgress?.run(model, Date.now());
+      });
+      try {
+        tx();
+      } catch (err) {
+        throw this.describeWriteFailure(err, model);
+      }
+      const modelDuration = ((Date.now() - modelStartTime) / 1e3).toFixed(1);
+      const elapsed = ((Date.now() - startTime) / 1e3).toFixed(0);
+      if (isCI()) {
+        log.detail(`[${progressPercent}%] ${model} - ${modelDuration}s (${elapsed}s total)`);
+      } else {
+        process.stdout.write(`\r      ${c.dim(`[${progressPercent}%]`)} ${model.padEnd(40)} ${c.dim(`${modelDuration}s (${elapsed}s total)`)}`);
+      }
+    }
+    const duration = ((Date.now() - startTime) / 1e3).toFixed(1);
+    if (!isCI()) {
+      console.log("");
+    }
+    if (incrementalFts) {
+      this.db.pragma("recursive_triggers = OFF");
+      log.ok(`Indexed ${models.length} model(s) in ${duration}s (FTS updated incrementally)`);
+    } else if (skipFts) {
+      log.info(`Skipping FTS rebuild (SKIP_FTS=true) - run 'npm run build-fts' to finish`);
+      this.createFTSTriggers();
+      log.ok(`Indexed ${models.length} model(s) in ${duration}s`);
+    } else {
+      const ftsStartTime = Date.now();
+      this.db.exec("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild');");
+      const ftsDuration = ((Date.now() - ftsStartTime) / 1e3).toFixed(1);
+      this.createFTSTriggers();
+      log.ok(`Indexed ${models.length} model(s) in ${duration}s (FTS rebuilt in ${ftsDuration}s)`);
+    }
+    this.touchLastIndexed();
+  }
+  /**
+   * Sort models by JSON file count descending.
+   * Ensures the largest models (e.g. Foundation with 56K files) are indexed first,
+   * so the most data is committed to disk before any CI pipeline timeout.
+   *
+   * Uses a single recursive readdirSync per model (Node 18.17+) instead of
+   * 20 separate readdirSync calls per subdirectory — ~20× fewer syscalls.
+   */
+  sortModelsBySize(metadataPath, models) {
+    const sized = models.map((model) => {
+      const modelPath = path.join(metadataPath, model);
+      let count = 0;
+      try {
+        const entries = fs2.readdirSync(modelPath, { recursive: true });
+        count = entries.filter((f) => f.endsWith(".json")).length;
+      } catch {
+      }
+      return { model, count };
+    });
+    return sized.sort((a, b) => b.count - a.count).map((s) => s.model);
+  }
+  /**
+   * Get the set of models already indexed (for RESUME=true builds).
+   */
+  getIndexedModels() {
+    try {
+      const rows = this.db.prepare(`SELECT model FROM _build_progress`).all();
+      return new Set(rows.map((r) => r.model));
+    } catch {
+      return /* @__PURE__ */ new Set();
+    }
+  }
+  /**
+   * Clear progress tracking checkpoint (call before a fresh full rebuild).
+   */
+  clearProgressTracking() {
+    try {
+      this.db.exec(`DELETE FROM _build_progress`);
+    } catch {
+    }
+  }
+  /**
+   * Rebuild the FTS index for symbols from scratch.
+   * Use this as a standalone step after a SKIP_FTS=true build (Phase 2 of two-phase CI).
+   */
+  rebuildFTS() {
+    log.step("Rebuilding symbols FTS index...");
+    this.db.exec("DROP TRIGGER IF EXISTS symbols_ai;");
+    this.db.exec("DROP TRIGGER IF EXISTS symbols_au;");
+    this.db.exec("DROP TRIGGER IF EXISTS symbols_ad;");
+    const start = Date.now();
+    this.db.exec("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild');");
+    const duration = ((Date.now() - start) / 1e3).toFixed(1);
+    this.createFTSTriggers();
+    log.ok(`Symbols FTS index rebuilt in ${duration}s`);
+  }
+  async getModelDirectories(metadataPath) {
+    const entries = fs2.readdirSync(metadataPath, { withFileTypes: true });
+    return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  }
+  indexClasses(classesPath, model) {
+    const files = fs2.readdirSync(classesPath).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      try {
+        const filePath = path.join(classesPath, file);
+        const content = fs2.readFileSync(filePath, "utf-8");
+        const classData = JSON.parse(content);
+        const sourceFilePath = classData.sourcePath || filePath;
+        this.addSymbol({
+          name: classData.name,
+          type: "class",
+          signature: classData.extends ? `extends ${classData.extends}` : void 0,
+          filePath: sourceFilePath,
+          model,
+          description: classData.description || classData.documentation,
+          tags: classData.tags?.join(", "),
+          extendsClass: classData.extends,
+          implementsInterfaces: classData.implements?.join(", "),
+          visibility: classData.visibility,
+          usedTypes: classData.usedTypes?.join(", "),
+          // Pattern analysis fields
+          patternType: classData.patternType,
+          typicalUsages: classData.typicalUsages ? JSON.stringify(classData.typicalUsages) : void 0,
+          relatedMethods: classData.relatedMethods ? JSON.stringify(classData.relatedMethods) : void 0,
+          apiPatterns: classData.apiPatterns ? JSON.stringify(classData.apiPatterns) : void 0
+        });
+        if (classData.methods && Array.isArray(classData.methods)) {
+          for (const method of classData.methods) {
+            this.addSymbol({
+              name: method.name,
+              type: "method",
+              parentName: classData.name,
+              signature: renderMethodSignature(method),
+              filePath: sourceFilePath,
+              model,
+              description: method.documentation,
+              tags: method.tags?.join(", "),
+              sourceSnippet: method.sourceSnippet,
+              source: method.source,
+              complexity: method.complexity,
+              usedTypes: method.usedTypes?.join(", "),
+              methodCalls: method.methodCalls?.join(", "),
+              inlineComments: method.inlineComments,
+              usageExample: method.usageExample,
+              // Pattern analysis fields
+              typicalUsages: method.typicalUsages ? JSON.stringify(method.typicalUsages) : void 0,
+              relatedMethods: method.relatedMethods ? JSON.stringify(method.relatedMethods) : void 0
+            });
+          }
+        }
+      } catch (error) {
+        log.warn(`Skipped ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexTables(tablesPath, model) {
+    const files = fs2.readdirSync(tablesPath).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      try {
+        const filePath = path.join(tablesPath, file);
+        const content = fs2.readFileSync(filePath, "utf-8");
+        const tableData = JSON.parse(content);
+        const sourceFilePath = tableData.sourcePath || filePath;
+        this.addSymbol({
+          name: tableData.name,
+          type: "table",
+          signature: tableData.label || void 0,
+          filePath: sourceFilePath,
+          model
+        });
+        this.recordTablePropertyStats(tableData, model);
+        if (tableData.fields && Array.isArray(tableData.fields)) {
+          for (const field of tableData.fields) {
+            this.addSymbol({
+              name: field.name,
+              type: "field",
+              parentName: tableData.name,
+              signature: field.type,
+              filePath: sourceFilePath,
+              model
+            });
+          }
+        }
+        if (tableData.methods && Array.isArray(tableData.methods)) {
+          for (const method of tableData.methods) {
+            this.addSymbol({
+              name: method.name,
+              type: "method",
+              parentName: tableData.name,
+              signature: renderMethodSignature(method),
+              filePath: sourceFilePath,
+              model,
+              description: method.documentation,
+              tags: method.tags?.join(", "),
+              sourceSnippet: method.sourceSnippet,
+              source: method.source,
+              complexity: method.complexity,
+              usedTypes: method.usedTypes?.join(", "),
+              methodCalls: method.methodCalls?.join(", "),
+              inlineComments: method.inlineComments
+            });
+          }
+        }
+        if (tableData.relations && Array.isArray(tableData.relations)) {
+          const stmt = this.db.prepare(`
+            INSERT OR IGNORE INTO table_relations (
+              source_table, target_table, relation_name, constraint_fields, model
+            ) VALUES (?, ?, ?, ?, ?)
+          `);
+          for (const relation of tableData.relations) {
+            if (relation.name && relation.relatedTable) {
+              const constraintFields = relation.constraints ? JSON.stringify(relation.constraints) : null;
+              stmt.run(
+                tableData.name,
+                relation.relatedTable,
+                relation.name,
+                constraintFields,
+                model
+              );
+            }
+          }
+        }
+      } catch (error) {
+        log.warn(`Skipped table ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexEnums(enumsPath, model) {
+    const files = fs2.readdirSync(enumsPath).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      try {
+        const filePath = path.join(enumsPath, file);
+        const content = fs2.readFileSync(filePath, "utf-8");
+        const enumData = JSON.parse(content);
+        const sourceFilePath = enumData.sourcePath || filePath;
+        const enumName = enumData.name || path.basename(file, ".json");
+        this.addSymbol({
+          name: enumName,
+          type: "enum",
+          filePath: sourceFilePath,
+          model
+        });
+      } catch (error) {
+        log.warn(`Skipped enum ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexEdts(edtsPath, model) {
+    const files = fs2.readdirSync(edtsPath).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      try {
+        const filePath = path.join(edtsPath, file);
+        const content = fs2.readFileSync(filePath, "utf-8");
+        const edtData = JSON.parse(content);
+        const sourceFilePath = edtData.sourcePath || filePath;
+        const edtName = edtData.name || path.basename(file, ".json");
+        let signature;
+        if (edtData.extends) {
+          signature = edtData.extends;
+        } else if (edtData.enumType) {
+          signature = edtData.enumType;
+        } else if (typeof edtData.raw === "string") {
+          const extendsMatch = edtData.raw.match(/<Extends>([^<]+)<\/Extends>/i);
+          const enumTypeMatch = edtData.raw.match(/<EnumType>([^<]+)<\/EnumType>/i);
+          signature = extendsMatch?.[1]?.trim() || enumTypeMatch?.[1]?.trim();
+        }
+        this.addSymbol({
+          name: edtName,
+          type: "edt",
+          signature,
+          filePath: sourceFilePath,
+          model
+        });
+        if (edtData.extends || edtData.enumType || edtData.referenceTable || edtData.stringSize || edtData.displayLength || edtData.label || edtData.databaseStringSize) {
+          const stmt = this.db.prepare(`
+            INSERT OR REPLACE INTO edt_metadata (
+              edt_name, extends, enum_type, reference_table, relation_type,
+              string_size, database_string_size, display_length, label, model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          stmt.run(
+            edtName,
+            edtData.extends || null,
+            edtData.enumType || null,
+            edtData.referenceTable || null,
+            edtData.relationType || null,
+            edtData.stringSize || null,
+            edtData.databaseStringSize || null,
+            edtData.displayLength || null,
+            edtData.label || null,
+            model
+          );
+        }
+      } catch (error) {
+        log.warn(`Skipped edt ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexReports(reportsPath, model) {
+    const files = fs2.readdirSync(reportsPath).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      try {
+        const filePath = path.join(reportsPath, file);
+        const content = fs2.readFileSync(filePath, "utf-8");
+        const reportData = JSON.parse(content);
+        const sourceFilePath = reportData.sourcePath || filePath;
+        const reportName = reportData.name || path.basename(file, ".json");
+        this.addSymbol({
+          name: reportName,
+          type: "report",
+          filePath: sourceFilePath,
+          model
+        });
+      } catch (error) {
+        log.warn(`Skipped report ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexForms(formsPath, model) {
+    const files = fs2.readdirSync(formsPath).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      try {
+        const filePath = path.join(formsPath, file);
+        const content = fs2.readFileSync(filePath, "utf-8");
+        const formData = JSON.parse(content);
+        const sourceFilePath = formData.sourcePath || filePath;
+        const formName = formData.name || path.basename(file, ".json");
+        this.addSymbol({
+          name: formName,
+          type: "form",
+          filePath: sourceFilePath,
+          model,
+          description: formData.caption || formData.label
+        });
+        if (formData.patternNodes && Array.isArray(formData.patternNodes)) {
+          const patternStmt = this.db.prepare(`
+            INSERT OR REPLACE INTO form_patterns (
+              form_name, model, node_path, control_name, control_type,
+              pattern, pattern_version, child_sequence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          for (const node of formData.patternNodes) {
+            if (!node?.pattern || !node?.nodePath) continue;
+            patternStmt.run(
+              formName,
+              model,
+              node.nodePath,
+              node.controlName ?? "",
+              node.controlType ?? "",
+              node.pattern,
+              node.patternVersion ?? null,
+              JSON.stringify(node.childSequence ?? [])
+            );
+            if (node.nodePath === "Design" && this.isMineableModel(model)) {
+              this.recordPropertyStat("AxFormDesign", "Pattern", node.pattern, model);
+              this.recordPropertyStat(
+                "AxFormDesign",
+                `PatternVersion:${node.pattern}`,
+                node.patternVersion ?? "(absent)",
+                model
+              );
+            }
+          }
+        }
+        if (formData.dataSources && Array.isArray(formData.dataSources)) {
+          const stmt = this.db.prepare(`
+            INSERT OR REPLACE INTO form_datasources (
+              form_name, datasource_name, table_name, 
+              allow_edit, allow_create, allow_delete, model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          `);
+          for (const ds of formData.dataSources) {
+            if (ds.name && ds.table) {
+              stmt.run(
+                formName,
+                ds.name,
+                ds.table,
+                ds.allowEdit ? 1 : 0,
+                ds.allowCreate ? 1 : 0,
+                ds.allowDelete ? 1 : 0,
+                model
+              );
+            }
+          }
+        }
+      } catch (error) {
+        log.warn(`Skipped form ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexQueries(queriesPath, model) {
+    const files = fs2.readdirSync(queriesPath).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      try {
+        const filePath = path.join(queriesPath, file);
+        const content = fs2.readFileSync(filePath, "utf-8");
+        const queryData = JSON.parse(content);
+        const sourceFilePath = queryData.sourcePath || filePath;
+        const queryName = queryData.name || path.basename(file, ".json");
+        this.addSymbol({
+          name: queryName,
+          type: "query",
+          filePath: sourceFilePath,
+          model,
+          description: queryData.title || queryData.label
+        });
+      } catch (error) {
+        log.warn(`Skipped query ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexViews(viewsPath, model) {
+    const files = fs2.readdirSync(viewsPath).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      try {
+        const filePath = path.join(viewsPath, file);
+        const content = fs2.readFileSync(filePath, "utf-8");
+        const viewData = JSON.parse(content);
+        const sourceFilePath = viewData.sourcePath || filePath;
+        const viewName = viewData.name || path.basename(file, ".json");
+        this.addSymbol({
+          name: viewName,
+          type: "view",
+          signature: viewData.type || void 0,
+          filePath: sourceFilePath,
+          model,
+          description: viewData.label || viewData.type
+        });
+        if (viewData.fields && Array.isArray(viewData.fields)) {
+          for (const field of viewData.fields) {
+            this.addSymbol({
+              name: field.name,
+              type: "field",
+              parentName: viewName,
+              signature: field.dataMethod || field.dataField || void 0,
+              filePath: sourceFilePath,
+              model
+            });
+          }
+        }
+        if (viewData.methods && Array.isArray(viewData.methods)) {
+          for (const method of viewData.methods) {
+            this.addSymbol({
+              name: method.name,
+              type: "method",
+              parentName: viewName,
+              signature: renderMethodSignature(method),
+              filePath: sourceFilePath,
+              model,
+              description: method.documentation,
+              tags: method.tags?.join(", "),
+              sourceSnippet: method.sourceSnippet,
+              source: method.source,
+              complexity: method.complexity,
+              usedTypes: method.usedTypes?.join(", "),
+              methodCalls: method.methodCalls?.join(", "),
+              inlineComments: method.inlineComments
+            });
+          }
+        }
+      } catch (error) {
+        log.warn(`Skipped view ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexSecurityPrivileges(dirPath, model) {
+    const files = fs2.readdirSync(dirPath).filter((f) => f.endsWith(".json"));
+    const insertEntry = this.db.prepare(`
+      INSERT OR IGNORE INTO security_privilege_entries
+        (privilege_name, entry_point_name, object_type, access_level, model)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    for (const file of files) {
+      try {
+        const filePath = path.join(dirPath, file);
+        const data = JSON.parse(fs2.readFileSync(filePath, "utf-8"));
+        const sourceFilePath = data.sourcePath || filePath;
+        const name = data.name || path.basename(file, ".json");
+        const entryPoints = data.entryPoints || [];
+        this.addSymbol({
+          name,
+          type: "security-privilege",
+          filePath: sourceFilePath,
+          model,
+          description: data.label || void 0,
+          signature: entryPoints.length > 0 ? `${entryPoints.length} entry point(s)` : void 0
+        });
+        for (const ep of entryPoints) {
+          if (!ep.name) continue;
+          const accessLevelStr = ep.accessLevel == null ? null : typeof ep.accessLevel === "object" ? Object.entries(ep.accessLevel).map(([k, v]) => `${k}:${v}`).join(",") : String(ep.accessLevel);
+          insertEntry.run(
+            name,
+            ep.name,
+            ep.objectType ?? null,
+            accessLevelStr,
+            model
+          );
+        }
+      } catch (error) {
+        log.warn(`Skipped security-privilege ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexSecurityDuties(dirPath, model) {
+    const files = fs2.readdirSync(dirPath).filter((f) => f.endsWith(".json"));
+    const insertPriv = this.db.prepare(`
+      INSERT OR IGNORE INTO security_duty_privileges (duty_name, privilege_name, model)
+      VALUES (?, ?, ?)
+    `);
+    for (const file of files) {
+      try {
+        const filePath = path.join(dirPath, file);
+        const data = JSON.parse(fs2.readFileSync(filePath, "utf-8"));
+        const sourceFilePath = data.sourcePath || filePath;
+        const name = data.name || path.basename(file, ".json");
+        const privileges = data.privileges || [];
+        this.addSymbol({
+          name,
+          type: "security-duty",
+          filePath: sourceFilePath,
+          model,
+          description: data.label || void 0,
+          signature: privileges.length > 0 ? `${privileges.length} privilege(s)` : void 0
+        });
+        for (const priv of privileges) {
+          insertPriv.run(name, priv, model);
+        }
+      } catch (error) {
+        log.warn(`Skipped security-duty ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexSecurityRoles(dirPath, model) {
+    const files = fs2.readdirSync(dirPath).filter((f) => f.endsWith(".json"));
+    const insertDuty = this.db.prepare(`
+      INSERT OR IGNORE INTO security_role_duties (role_name, duty_name, model)
+      VALUES (?, ?, ?)
+    `);
+    for (const file of files) {
+      try {
+        const filePath = path.join(dirPath, file);
+        const data = JSON.parse(fs2.readFileSync(filePath, "utf-8"));
+        const sourceFilePath = data.sourcePath || filePath;
+        const name = data.name || path.basename(file, ".json");
+        const duties = data.duties || [];
+        this.addSymbol({
+          name,
+          type: "security-role",
+          filePath: sourceFilePath,
+          model,
+          description: data.description || data.label || void 0,
+          signature: duties.length > 0 ? `${duties.length} duty(ies)` : void 0
+        });
+        for (const duty of duties) {
+          insertDuty.run(name, duty, model);
+        }
+      } catch (error) {
+        log.warn(`Skipped security-role ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexMenuItems(dirPath, model, menuItemType) {
+    const files = fs2.readdirSync(dirPath).filter((f) => f.endsWith(".json"));
+    const symbolType = `menu-item-${menuItemType}`;
+    const insertTarget = this.db.prepare(`
+      INSERT OR REPLACE INTO menu_item_targets
+        (menu_item_name, menu_item_type, target_object, target_type, security_privilege, label, model)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const file of files) {
+      try {
+        const filePath = path.join(dirPath, file);
+        const data = JSON.parse(fs2.readFileSync(filePath, "utf-8"));
+        const sourceFilePath = data.sourcePath || filePath;
+        const name = data.name || path.basename(file, ".json");
+        this.addSymbol({
+          name,
+          type: symbolType,
+          filePath: sourceFilePath,
+          model,
+          description: data.label || void 0,
+          signature: data.targetObject || data.object || void 0
+        });
+        insertTarget.run(
+          name,
+          menuItemType,
+          data.targetObject || data.object || null,
+          data.targetType || data.objectType || null,
+          data.securityPrivilege || null,
+          data.label || null,
+          model
+        );
+      } catch (error) {
+        log.warn(`Skipped menu-item-${menuItemType} ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexServices(dirPath, model) {
+    const files = fs2.readdirSync(dirPath).filter((f) => f.endsWith(".json"));
+    const insertOp = this.db.prepare(`
+      INSERT INTO service_operations
+        (service_name, operation_name, method_name, idempotent, model)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    for (const file of files) {
+      try {
+        const filePath = path.join(dirPath, file);
+        const data = JSON.parse(fs2.readFileSync(filePath, "utf-8"));
+        const sourceFilePath = data.sourcePath || filePath;
+        const name = data.name || path.basename(file, ".json");
+        this.addSymbol({
+          name,
+          type: "service",
+          filePath: sourceFilePath,
+          model,
+          signature: data.serviceClass || void 0,
+          description: data.externalName || void 0
+        });
+        if (Array.isArray(data.operations)) {
+          for (const op of data.operations) {
+            if (!op?.name) continue;
+            insertOp.run(name, op.name, op.method || op.name, op.idempotent ? 1 : 0, model);
+          }
+        }
+      } catch (error) {
+        log.warn(`Skipped service ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexServiceGroups(dirPath, model) {
+    const files = fs2.readdirSync(dirPath).filter((f) => f.endsWith(".json"));
+    const insertMember = this.db.prepare(`
+      INSERT INTO service_group_members (group_name, service_name, model)
+      VALUES (?, ?, ?)
+    `);
+    for (const file of files) {
+      try {
+        const filePath = path.join(dirPath, file);
+        const data = JSON.parse(fs2.readFileSync(filePath, "utf-8"));
+        const sourceFilePath = data.sourcePath || filePath;
+        const name = data.name || path.basename(file, ".json");
+        this.addSymbol({
+          name,
+          type: "service-group",
+          filePath: sourceFilePath,
+          model,
+          description: data.description || void 0
+        });
+        if (Array.isArray(data.services)) {
+          for (const svc of data.services) {
+            if (!svc) continue;
+            insertMember.run(name, svc, model);
+          }
+        }
+      } catch (error) {
+        log.warn(`Skipped service-group ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexMaps(dirPath, model) {
+    const files = fs2.readdirSync(dirPath).filter((f) => f.endsWith(".json"));
+    const insertMapping = this.db.prepare(`
+      INSERT INTO map_mappings (map_name, mapping_table, field_connections, model)
+      VALUES (?, ?, ?, ?)
+    `);
+    for (const file of files) {
+      try {
+        const filePath = path.join(dirPath, file);
+        const data = JSON.parse(fs2.readFileSync(filePath, "utf-8"));
+        const name = data.name || path.basename(file, ".json");
+        this.addSymbol({
+          name,
+          type: "map",
+          filePath: data.sourcePath || filePath,
+          model,
+          extendsClass: data.extends || void 0
+        });
+        if (Array.isArray(data.mappings)) {
+          for (const m of data.mappings) {
+            if (!m?.table) continue;
+            insertMapping.run(name, m.table, m.fieldConnections || 0, model);
+          }
+        }
+      } catch (error) {
+        log.warn(`Skipped map ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexConfigurationKeys(dirPath, model) {
+    const files = fs2.readdirSync(dirPath).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      try {
+        const filePath = path.join(dirPath, file);
+        const data = JSON.parse(fs2.readFileSync(filePath, "utf-8"));
+        const name = data.name || path.basename(file, ".json");
+        this.addSymbol({
+          name,
+          type: "configuration-key",
+          filePath: data.sourcePath || filePath,
+          model,
+          description: data.label || void 0,
+          signature: data.parentKey || void 0
+        });
+      } catch (error) {
+        log.warn(`Skipped configuration-key ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexLicenseCodes(dirPath, model) {
+    const files = fs2.readdirSync(dirPath).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      try {
+        const filePath = path.join(dirPath, file);
+        const data = JSON.parse(fs2.readFileSync(filePath, "utf-8"));
+        const name = data.name || path.basename(file, ".json");
+        const sig = [data.group, data.type].filter(Boolean).join(" / ") || void 0;
+        this.addSymbol({
+          name,
+          type: "license-code",
+          filePath: data.sourcePath || filePath,
+          model,
+          description: data.label || void 0,
+          signature: sig
+        });
+      } catch (error) {
+        log.warn(`Skipped license-code ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexSecurityPolicies(dirPath, model) {
+    const files = fs2.readdirSync(dirPath).filter((f) => f.endsWith(".json"));
+    const insertPolicy = this.db.prepare(`
+      INSERT INTO security_policies
+        (policy_name, primary_table, query_name, operation, constrained_table, label, model)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const file of files) {
+      try {
+        const filePath = path.join(dirPath, file);
+        const data = JSON.parse(fs2.readFileSync(filePath, "utf-8"));
+        const name = data.name || path.basename(file, ".json");
+        this.addSymbol({
+          name,
+          type: "security-policy",
+          filePath: data.sourcePath || filePath,
+          model,
+          description: data.label || void 0,
+          signature: data.primaryTable || void 0
+        });
+        insertPolicy.run(
+          name,
+          data.primaryTable || null,
+          data.query || null,
+          data.operation || null,
+          data.constrainedTable ? 1 : 0,
+          data.label || null,
+          model
+        );
+      } catch (error) {
+        log.warn(`Skipped security-policy ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexMacros(dirPath, model) {
+    const files = fs2.readdirSync(dirPath).filter((f) => f.endsWith(".json"));
+    const insertDefine = this.db.prepare(`
+      INSERT INTO macro_defines (macro_name, define_name, define_value, model)
+      VALUES (?, ?, ?, ?)
+    `);
+    for (const file of files) {
+      try {
+        const filePath = path.join(dirPath, file);
+        const data = JSON.parse(fs2.readFileSync(filePath, "utf-8"));
+        const name = data.name || path.basename(file, ".json");
+        this.addSymbol({
+          name,
+          type: "macro",
+          filePath: data.sourcePath || filePath,
+          model
+        });
+        if (Array.isArray(data.defines)) {
+          for (const d of data.defines) {
+            if (!d?.name) continue;
+            insertDefine.run(name, d.name, d.value ?? "", model);
+          }
+        }
+      } catch (error) {
+        log.warn(`Skipped macro ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  indexExtensions(dirPath, model, extensionType) {
+    const files = fs2.readdirSync(dirPath).filter((f) => f.endsWith(".json"));
+    const insertMeta = this.db.prepare(`
+      INSERT OR REPLACE INTO extension_metadata
+        (extension_name, extension_type, base_object_name, added_fields, added_methods,
+         added_indexes, coc_methods, event_subscriptions, model)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const file of files) {
+      try {
+        const filePath = path.join(dirPath, file);
+        const data = JSON.parse(fs2.readFileSync(filePath, "utf-8"));
+        const sourceFilePath = data.sourcePath || filePath;
+        const name = data.name || path.basename(file, ".json");
+        const baseObjectName = data.baseObjectName || data.extends || "";
+        this.addSymbol({
+          name,
+          type: extensionType,
+          filePath: sourceFilePath,
+          model,
+          parentName: baseObjectName || void 0,
+          extendsClass: baseObjectName || void 0,
+          signature: baseObjectName || void 0
+        });
+        insertMeta.run(
+          name,
+          extensionType,
+          baseObjectName,
+          data.addedFields ? JSON.stringify(data.addedFields) : null,
+          data.addedMethods ? JSON.stringify(data.addedMethods) : null,
+          data.addedIndexes ? JSON.stringify(data.addedIndexes) : null,
+          data.cocMethods ? JSON.stringify(data.cocMethods) : null,
+          data.eventSubscriptions ? JSON.stringify(data.eventSubscriptions) : null,
+          model
+        );
+      } catch (error) {
+        log.warn(`Skipped ${extensionType} ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+  /**
+   * Replace the extension_metadata row for a single extension.
+   *
+   * indexExtensions above is the full build's path and reads the extracted JSON;
+   * an incremental reindex has only the AOT file, and until it could write here
+   * an extension changed in-session was invisible to every reader keyed on
+   * base_object_name — resolve_references' field and method checks above all,
+   * which report an unknown identifier as an ERROR and, under
+   * GROUNDING_ENFORCE, refuse the write carrying it.
+   *
+   * Delete-then-insert: the table has no unique constraint, so the INSERT OR
+   * REPLACE the full build uses only ever appends. Keyed by name + type + model,
+   * which is what identifies one extension across a rebuild.
+   */
+  upsertExtensionMetadata(record) {
+    const json = (values) => values && values.length > 0 ? JSON.stringify(values) : null;
+    this.db.transaction(() => {
+      this.removeExtensionMetadata(record.extensionName, record.extensionType, record.model);
+      this.db.prepare(`
+        INSERT INTO extension_metadata
+          (extension_name, extension_type, base_object_name, added_fields, added_methods,
+           added_indexes, coc_methods, event_subscriptions, model)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        record.extensionName,
+        record.extensionType,
+        record.baseObjectName,
+        json(record.addedFields),
+        json(record.addedMethods),
+        json(record.addedIndexes),
+        json(record.cocMethods),
+        json(record.eventSubscriptions),
+        record.model
+      );
+    })();
+  }
+  /** Drop the extension_metadata row(s) for one extension. Returns rows removed. */
+  removeExtensionMetadata(extensionName, extensionType, model) {
+    try {
+      return this.db.prepare(
+        `DELETE FROM extension_metadata
+         WHERE extension_name = ? AND extension_type = ? AND model = ?`
+      ).run(extensionName, extensionType, model).changes;
+    } catch {
+      return 0;
+    }
+  }
+  // Index freshness bookkeeping
+  /** Record "the index was (re)built/updated now" — drives staleness detection. */
+  touchLastIndexed() {
+    try {
+      this.db.prepare(
+        `INSERT OR REPLACE INTO _index_meta (key, value) VALUES ('last_indexed_at', ?)`
+      ).run((/* @__PURE__ */ new Date()).toISOString());
+    } catch {
+    }
+  }
+  /** ISO timestamp of the last full or incremental index update, or null. */
+  getLastIndexedAt() {
+    try {
+      const row = this.getReadDb().prepare(
+        `SELECT value FROM _index_meta WHERE key = 'last_indexed_at'`
+      ).get();
+      return row?.value ?? null;
+    } catch {
+      return null;
+    }
+  }
+  // Property statistics (data-driven BP rules)
+  /**
+   * Record one observation of a metadata property value.
+   * Presence checks use the special values '(present)' / '(absent)'.
+   */
+  recordPropertyStat(nodeType, property, value, model) {
+    const key = `${nodeType}|${property}|${value}|${model}`;
+    this.propStatBuffer.set(key, (this.propStatBuffer.get(key) ?? 0) + 1);
+  }
+  /**
+   * Flush all buffered property_stats observations to the database in a single
+   * batch. Call once at the end of each model's transaction. The buffer is
+   * cleared after flushing so repeated calls are safe.
+   */
+  flushPropertyStats() {
+    if (this.propStatBuffer.size === 0) return;
+    let stmt = this.stmtCache.get("flushPropertyStat");
+    if (!stmt) {
+      stmt = this.db.prepare(`
+        INSERT INTO property_stats (node_type, property, value, model, count)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(node_type, property, value, model) DO UPDATE SET count = count + excluded.count
+      `);
+      this.stmtCache.set("flushPropertyStat", stmt);
+    }
+    for (const [key, count] of this.propStatBuffer) {
+      const [nodeType, property, value, model] = key.split("|");
+      stmt.run(nodeType, property, value, model, count);
+    }
+    this.propStatBuffer.clear();
+  }
+  /**
+   * Ratio of '(present)' observations for a property across all mined models.
+   * Returns total=0 when no statistics exist (validate_xpp falls back to
+   * static defaults in that case).
+   */
+  getPropertyPresenceRatio(nodeType, property) {
+    const rows = this.getReadDb().prepare(
+      `SELECT value, SUM(count) AS c FROM property_stats
+       WHERE node_type = ? AND property = ? GROUP BY value`
+    ).all(nodeType, property);
+    let present = 0;
+    let total = 0;
+    for (const row of rows) {
+      total += row.c;
+      if (row.value === "(present)") present += row.c;
+    }
+    return { present, total, ratio: total > 0 ? present / total : 0 };
+  }
+  /** Most common values for a property, ordered by observation count. */
+  getPropertyValueDistribution(nodeType, property, limit = 10) {
+    return this.getReadDb().prepare(
+      `SELECT value, SUM(count) AS count FROM property_stats
+       WHERE node_type = ? AND property = ? AND value NOT IN ('(present)', '(absent)')
+       GROUP BY value ORDER BY count DESC LIMIT ?`
+    ).all(nodeType, property, limit);
+  }
+  /**
+   * Tell the index which models this run knows to be non-Microsoft, overriding the
+   * name-based `isStandardModel()` heuristic for the property-stats miners.
+   *
+   * `isStandardModel()` reads CUSTOM_MODELS/EXTENSION_PREFIX from the environment, and
+   * `build-database` runs as a separate process where CUSTOM_MODELS is deliberately empty
+   * on UDE (custom models are path-auto-detected during extract — see
+   * src/utils/extractManifest.ts). Without this, our own model and every third-party ISV
+   * model under the custom root are mined as if Microsoft had authored them, and the
+   * mined defaults that `prepare`/`generate_object`/`validate_code` present as platform
+   * convention are really our own past habits fed back to us.
+   *
+   * The list is additive: a model here is never mined, and models not listed still go
+   * through `isStandardModel()`. Pass an empty array to assert "the caller checked and
+   * found none" — that is different from never calling this at all.
+   */
+  setNonMicrosoftModels(models) {
+    this.nonMicrosoftModels = new Set(models.map((m) => m.toLowerCase()));
+    this.mineableModelCache.clear();
+  }
+  /**
+   * Single gate for every property-stats miner: may this model's metadata be mined as
+   * evidence of "what the standard Microsoft platform does"?
+   */
+  isMineableModel(model) {
+    const cached2 = this.mineableModelCache.get(model);
+    if (cached2 !== void 0) return cached2;
+    const mineable = !this.nonMicrosoftModels?.has(model.toLowerCase()) && isStandardModel(model);
+    this.mineableModelCache.set(model, mineable);
+    return mineable;
+  }
+  /**
+   * Delete property_stats rows for models that today's gate would not mine.
+   *
+   * The counts are cumulative (`ON CONFLICT ... count + excluded.count`), so gating the
+   * miners only stops NEW pollution — rows written by an earlier build survive until
+   * something removes them. This is that something, and it is cheap enough to run on every
+   * build: the table is tiny (a few thousand rows, ~150 models on a full D365FO index)
+   * because it stores one row per node_type/property/value/model, not per object.
+   *
+   * Re-evaluates every model actually present in the table rather than only the models
+   * this run was told about, so it also clears historical pollution — e.g. rows mined
+   * before a model was added to CUSTOM_MODELS. It is therefore only as good as the current
+   * notion of "non-Microsoft": an ISV model that neither the extract manifest nor
+   * isStandardModel() knows about stays until it is declared.
+   *
+   * Returns the models purged (empty when the corpus is already clean). With
+   * `{ dryRun: true }` it returns the same list without deleting anything, so callers can
+   * report the damage without duplicating the predicate.
+   */
+  purgeNonMineableStats(opts = {}) {
+    const models = this.db.prepare("SELECT DISTINCT model FROM property_stats").all().map((r) => r.model);
+    const toPurge = models.filter((m) => !this.isMineableModel(m));
+    if (toPurge.length === 0 || opts.dryRun) return toPurge;
+    const purge = this.db.transaction((names) => {
+      for (let i = 0; i < names.length; i += 400) {
+        const chunk = names.slice(i, i + 400);
+        const placeholders = chunk.map(() => "?").join(",");
+        this.db.prepare(`DELETE FROM property_stats WHERE model IN (${placeholders})`).run(...chunk);
+      }
+    });
+    purge(toPurge);
+    return toPurge;
+  }
+  /**
+   * Mine property statistics from one parsed table JSON. Only standard
+   * (Microsoft) models are mined — the stats answer "what does the standard
+   * platform do", not "what did our customizations do".
+   */
+  recordTablePropertyStats(tableData, model) {
+    if (!this.isMineableModel(model)) return;
+    const presence = (v) => v ? "(present)" : "(absent)";
+    try {
+      const hasLabel = !!tableData.label && tableData.label !== tableData.name;
+      this.recordPropertyStat("AxTable", "Label", presence(hasLabel), model);
+      this.recordPropertyStat("AxTable", "TableGroup", tableData.tableGroup || "(absent)", model);
+      this.recordPropertyStat("AxTable", "PrimaryIndex", presence(tableData.primaryIndex), model);
+      this.recordPropertyStat("AxTable", "ClusteredIndex", presence(tableData.clusteredIndex), model);
+      const indexes = Array.isArray(tableData.indexes) ? tableData.indexes : [];
+      this.recordPropertyStat(
+        "AxTable",
+        "AlternateKeyIndex",
+        presence(indexes.some((i) => i?.unique)),
+        model
+      );
+      const fields = Array.isArray(tableData.fields) ? tableData.fields : [];
+      for (const field of fields) {
+        this.recordPropertyStat(
+          "AxTableField",
+          "ExtendedDataType",
+          presence(field?.extendedDataType || field?.enumType),
+          model
+        );
+      }
+    } catch {
+    }
+  }
+  /**
+   * Get class methods for autocomplete
+   */
+  getClassMethods(className) {
+    let stmt = this.stmtCache.get("getClassMethods");
+    if (!stmt) {
+      stmt = this.db.prepare(`SELECT * FROM symbols WHERE parent_name = ? AND type = 'method' ORDER BY name`);
+      this.stmtCache.set("getClassMethods", stmt);
+    }
+    return stmt.all(className).map((row) => this.rowToSymbol(row));
+  }
+  /**
+   * Get table fields for autocomplete
+   */
+  getTableFields(tableName) {
+    let stmt = this.stmtCache.get("getTableFields");
+    if (!stmt) {
+      stmt = this.db.prepare(`SELECT * FROM symbols WHERE parent_name = ? AND type = 'field' ORDER BY name`);
+      this.stmtCache.set("getTableFields", stmt);
+    }
+    return stmt.all(tableName).map((row) => this.rowToSymbol(row));
+  }
+  /**
+   * Get completions for a class or table
+   */
+  getCompletions(objectName, prefix) {
+    let stmt = this.stmtCache.get("getCompletions");
+    if (!stmt) {
+      stmt = this.db.prepare(
+        `SELECT name, type, signature FROM symbols
+         WHERE parent_name = ? AND type IN ('method', 'field')
+         ORDER BY type DESC, name`
+        // methods before fields
+      );
+      this.stmtCache.set("getCompletions", stmt);
+    }
+    const allMembers = stmt.all(objectName);
+    const filtered = prefix ? allMembers.filter((m) => m.name.toLowerCase().startsWith(prefix.toLowerCase())) : allMembers;
+    return filtered.map((m) => ({
+      label: m.name,
+      kind: m.type === "method" ? "Method" : "Field",
+      detail: m.signature ?? void 0,
+      documentation: void 0
+    }));
+  }
+  /**
+   * Search custom extensions by prefix.
+   *
+   * Restricts results to symbol types whose names carry the `*_Extension` /
+   * `*.<model>Extension` convention (class-extension, table-extension, etc.)
+   * so that unrelated symbols sharing a substring don't leak into extension UI.
+   *
+   * `model IN (custom models)` is what makes this affordable, and it has to be the
+   * FIRST predicate. A leading-wildcard `name LIKE '%q%'` is unindexable, so with the
+   * whole corpus in scope every call scanned all 584 K symbols — measured at 122.8 s on
+   * the production DB. Against idx_symbols_model the same scan covers only the ~25
+   * custom models. The filter is also a correctness fix: the results were already
+   * captioned "matches in custom extensions" while Microsoft rows could satisfy the
+   * name convention and appear there.
+   *
+   * `types` narrows to symbol kinds (the `type` argument of search(scope="extensions"),
+   * which used to be dropped before it reached here). A method or field is matched on
+   * its PARENT carrying the extension convention — its own name never does.
+   */
+  searchCustomExtensions(query, prefix, limit = 20, types) {
+    const customModels = this.getCustomModels().filter((m) => !prefix || m.toLowerCase().startsWith(prefix.toLowerCase()));
+    if (customModels.length === 0) return [];
+    const escapeLikePattern = (value) => value.replace(/\\/g, "\\\\").replace(/[%_]/g, "\\$&");
+    const modelPlaceholders = customModels.map(() => "?").join(",");
+    let sql = `
+      SELECT *
+      FROM symbols
+      WHERE model IN (${modelPlaceholders})
+        AND name LIKE ? ESCAPE '\\'
+        AND (
+          type IN (
+            'class-extension','table-extension','form-extension','enum-extension',
+            'edt-extension','view-extension','query-extension','data-entity-extension',
+            'map-extension','menu-extension','security-role-extension','security-duty-extension',
+            'menu-item-display-extension','menu-item-action-extension','menu-item-output-extension'
+          )
+          OR name LIKE '%\\_Extension' ESCAPE '\\'
+          OR name LIKE '%.%Extension'
+          OR parent_name LIKE '%\\_Extension' ESCAPE '\\'
+          OR parent_name LIKE '%.%Extension'
+        )
+    `;
+    const params = [...customModels, `%${escapeLikePattern(query)}%`];
+    if (types && types.length > 0) {
+      sql += ` AND +type IN (${types.map(() => "?").join(",")})`;
+      params.push(...types);
+    }
+    sql += ` ORDER BY name LIMIT ?`;
+    params.push(limit);
+    const rows = this.getReadDb().prepare(sql).all(...params);
+    return rows.map((row) => this.rowToSymbol(row));
+  }
+  /**
+   * Get list of custom models (non-standard models).
+   *
+   * Standard-model determination is delegated to `isStandardModel()` from
+   * modelClassifier (CUSTOM_MODELS / EXTENSION_PREFIX / configured target model).
+   * The legacy `this.standardModels` array is always empty (see
+   * `loadStandardModels()`), so filtering against it used to return EVERY model
+   * — including Microsoft's — as "custom". Filtering via `isStandardModel()`
+   * restores the intended custom-only result.
+   */
+  getCustomModels() {
+    const stmt = this.db.prepare(`
+      SELECT DISTINCT model
+      FROM symbols
+      ORDER BY model
+    `);
+    const rows = stmt.all();
+    return rows.map((row) => row.model).filter((model) => !isStandardModel(model));
+  }
+  /**
+   * Full-text symbol search restricted to CUSTOM/ISV models.
+   *
+   * Broad keyword searches routed through the C# bridge fill their fixed result
+   * window (`maxResults`) in provider-enumeration order, which is dominated by
+   * the far larger Microsoft standard corpus — so custom matches that enumerate
+   * later get truncated and the search looks like it "only returns Microsoft
+   * objects". The search tool probes this method in parallel and splices the
+   * custom hits back in, ranked directly after exact-name matches.
+   *
+   * Index-safe: the FTS5 MATCH drives the query and the `model IN (...)` filter
+   * (idx_symbols_model) narrows to the small custom set. The LIKE fallback (only
+   * reached on an FTS5 syntax error) is also model-scoped, so the selective
+   * `model IN` predicate keeps it off a full `%query%` scan of the whole corpus.
+   */
+  searchCustomModelSymbols(query, types, limit = 15) {
+    const customModels = this.getCustomModels();
+    if (customModels.length === 0) return [];
+    const modelPlaceholders = customModels.map(() => "?").join(",");
+    const ftsQuery = this.sanitizeFtsQuery(query);
+    const db = this.getReadDb();
+    let sql = `
+      SELECT s.id, s.name, s.type, s.parent_name, s.signature, s.file_path, s.model, s.description
+      FROM symbols_fts fts
+      JOIN symbols s ON s.id = fts.rowid
+      WHERE symbols_fts MATCH ?
+        AND s.model IN (${modelPlaceholders})
+    `;
+    const params = [ftsQuery, ...customModels];
+    if (types && types.length > 0) {
+      sql += ` AND s.type IN (${types.map(() => "?").join(",")})`;
+      params.push(...types);
+    }
+    sql += ` ORDER BY rank LIMIT ?`;
+    params.push(limit);
+    try {
+      const stmt = db.prepare(sql);
+      return stmt.all(...params).map((row) => this.rowToSymbol(row));
+    } catch {
+      const escapeLikePattern = (value) => value.replace(/\\/g, "\\\\").replace(/[%_]/g, "\\$&");
+      let fb = `
+        SELECT s.id, s.name, s.type, s.parent_name, s.signature, s.file_path, s.model, s.description
+        FROM symbols s
+        WHERE s.name LIKE ? ESCAPE '\\'
+          AND s.model IN (${modelPlaceholders})
+      `;
+      const fbParams = [`%${escapeLikePattern(query)}%`, ...customModels];
+      if (types && types.length > 0) {
+        fb += ` AND s.type IN (${types.map(() => "?").join(",")})`;
+        fbParams.push(...types);
+      }
+      fb += ` ORDER BY s.name LIMIT ?`;
+      fbParams.push(limit);
+      try {
+        return db.prepare(fb).all(...fbParams).map((r) => this.rowToSymbol(r));
+      } catch {
+        return [];
+      }
+    }
+  }
+  /**
+   * Analyze code patterns for a given scenario/domain
+   */
+  analyzeCodePatterns(scenario, classPattern, limit = 20) {
+    const keywords = scenario.toLowerCase().split(/\s+/).filter((w) => w.length > 3 && !["with", "which", "will", "that", "this", "from", "have"].includes(w));
+    const buildLikeSql = () => {
+      const likeSql = keywords.length > 0 ? `SELECT DISTINCT s.* FROM symbols s WHERE s.type = 'class' AND (${keywords.map(() => "s.name LIKE ? OR s.tags LIKE ? OR s.description LIKE ?").join(" OR ")})` : `SELECT DISTINCT s.* FROM symbols s WHERE s.type = 'class' AND (s.name LIKE ? OR s.tags LIKE ? OR s.description LIKE ?)`;
+      const likeParams = keywords.length > 0 ? keywords.flatMap((kw) => [`%${kw}%`, `%${kw}%`, `%${kw}%`]) : [`%${scenario}%`, `%${scenario}%`, `%${scenario}%`];
+      return { likeSql, likeParams };
+    };
+    let classes;
+    if (keywords.length > 0) {
+      const safeFtsTerms = keywords.map((kw) => `"${kw.replace(/"/g, "")}"`);
+      let sql = `
+        SELECT DISTINCT s.* 
+        FROM symbols s
+        WHERE s.type = 'class'
+          AND (
+            s.id IN (
+              SELECT rowid FROM symbols_fts WHERE symbols_fts MATCH ?
+            )
+            ${safeFtsTerms.slice(1).map(() => `
+            OR s.id IN (
+              SELECT rowid FROM symbols_fts WHERE symbols_fts MATCH ?
+            )`).join("")}
+            ${keywords.map(() => "OR s.name LIKE ? OR s.tags LIKE ?").join(" ")}
+          )
+      `;
+      const params = [];
+      params.push(...safeFtsTerms);
+      for (const keyword of keywords) {
+        params.push(`%${keyword}%`, `%${keyword}%`);
+      }
+      if (classPattern) {
+        sql += ` AND s.name LIKE ?`;
+        params.push(`%${classPattern}%`);
+      }
+      sql += ` LIMIT ?`;
+      params.push(limit);
+      try {
+        classes = this.db.prepare(sql).all(...params);
+      } catch {
+        const { likeSql, likeParams } = buildLikeSql();
+        let fallback = likeSql;
+        const fallbackParams = [...likeParams];
+        if (classPattern) {
+          fallback += ` AND s.name LIKE ?`;
+          fallbackParams.push(`%${classPattern}%`);
+        }
+        fallback += ` LIMIT ?`;
+        fallbackParams.push(limit);
+        classes = this.db.prepare(fallback).all(...fallbackParams);
+      }
+    } else {
+      const { likeSql, likeParams } = buildLikeSql();
+      let fallback = likeSql;
+      const fallbackParams = [...likeParams];
+      if (classPattern) {
+        fallback += ` AND s.name LIKE ?`;
+        fallbackParams.push(`%${classPattern}%`);
+      }
+      fallback += ` LIMIT ?`;
+      fallbackParams.push(limit);
+      classes = this.db.prepare(fallback).all(...fallbackParams);
+    }
+    const methodFrequency = {};
+    const dependencyFrequency = {};
+    const exampleClasses = [];
+    for (const cls of classes) {
+      exampleClasses.push(cls.name);
+      if (cls.used_types) {
+        for (const rawType of cls.used_types.split(",")) {
+          const cleaned = rawType.trim();
+          if (cleaned) dependencyFrequency[cleaned] = (dependencyFrequency[cleaned] || 0) + 1;
+        }
+      }
+    }
+    if (classes.length > 0) {
+      const classNames = classes.map((c2) => c2.name);
+      const placeholders = classNames.map(() => "?").join(",");
+      const allMethods = this.db.prepare(
+        `SELECT name FROM symbols WHERE type = 'method' AND parent_name IN (${placeholders})`
+      ).all(...classNames);
+      for (const method of allMethods) {
+        methodFrequency[method.name] = (methodFrequency[method.name] || 0) + 1;
+      }
+    }
+    const commonMethods = Object.entries(methodFrequency).sort(([, a], [, b]) => b - a).slice(0, 20).map(([name, count]) => ({ name, frequency: count }));
+    const commonDependencies = Object.entries(dependencyFrequency).sort(([, a], [, b]) => b - a).slice(0, 15).map(([name, count]) => ({ name, frequency: count }));
+    return {
+      scenario,
+      totalMatches: classes.length,
+      commonMethods,
+      commonDependencies,
+      exampleClasses: exampleClasses.slice(0, 10),
+      patterns: this.detectPatternTypes(classes)
+    };
+  }
+  /**
+   * Detect pattern types from set of classes
+   */
+  detectPatternTypes(classes) {
+    const patterns = {};
+    for (const cls of classes) {
+      const name = cls.name;
+      let patternType = "Unknown";
+      if (name.endsWith("Helper")) patternType = "Helper";
+      else if (name.endsWith("Service")) patternType = "Service";
+      else if (name.endsWith("Controller")) patternType = "Controller";
+      else if (name.endsWith("Handler")) patternType = "Handler";
+      else if (name.endsWith("Repository") || name.endsWith("Repo")) patternType = "Repository";
+      else if (name.endsWith("Manager")) patternType = "Manager";
+      else if (name.endsWith("Factory")) patternType = "Factory";
+      else if (name.endsWith("Builder")) patternType = "Builder";
+      else if (name.endsWith("Processor")) patternType = "Processor";
+      else if (name.endsWith("Validator")) patternType = "Validator";
+      if (!patterns[patternType]) {
+        patterns[patternType] = { count: 0, examples: [] };
+      }
+      patterns[patternType].count++;
+      if (patterns[patternType].examples.length < 5) {
+        patterns[patternType].examples.push(name);
+      }
+    }
+    return Object.entries(patterns).map(([type, data]) => ({
+      patternType: type,
+      count: data.count,
+      examples: data.examples
+    }));
+  }
+  /**
+   * Find similar methods based on name and context
+   */
+  findSimilarMethods(methodName, _contextClass, limit = 10) {
+    const stmtKeyExact = "findSimilarMethods:exact";
+    let stmtExact = this.stmtCache.get(stmtKeyExact);
+    if (!stmtExact) {
+      stmtExact = this.db.prepare(`
+        SELECT s.name, s.parent_name, s.signature, s.source_snippet, s.complexity, s.tags,
+               parent.pattern_type
+        FROM symbols s
+        LEFT JOIN symbols parent ON s.parent_name = parent.name AND parent.type = 'class'
+        WHERE s.type = 'method' AND s.name = ?
+        ORDER BY s.complexity ASC
+        LIMIT ?
+      `);
+      this.stmtCache.set(stmtKeyExact, stmtExact);
+    }
+    let methods = stmtExact.all(methodName, limit);
+    if (methods.length === 0) {
+      let stmtLike = this.stmtCache.get("findSimilarMethods:like");
+      if (!stmtLike) {
+        stmtLike = this.db.prepare(`
+          SELECT s.name, s.parent_name, s.signature, s.source_snippet, s.complexity, s.tags,
+                 parent.pattern_type
+          FROM symbols s
+          LEFT JOIN symbols parent ON s.parent_name = parent.name AND parent.type = 'class'
+          WHERE s.type = 'method' AND s.name LIKE ?
+          ORDER BY s.complexity ASC, s.name
+          LIMIT ?
+        `);
+        this.stmtCache.set("findSimilarMethods:like", stmtLike);
+      }
+      methods = stmtLike.all(`%${methodName}%`, limit);
+    }
+    return methods.map((m) => ({
+      className: m.class_name || m.parent_name,
+      methodName: m.name,
+      signature: m.signature,
+      sourceSnippet: m.source_snippet,
+      complexity: m.complexity,
+      tags: m.tags?.split(",").filter(Boolean) || [],
+      patternType: m.pattern_type
+    }));
+  }
+  getApiUsagePatterns(className) {
+    const safe = className.replace(/["\(\)\\]/g, "").trim();
+    if (!safe) return [];
+    let stmt = this.stmtCache.get("getApiUsagePatterns");
+    if (!stmt) {
+      stmt = this.db.prepare(
+        `SELECT name, parent_name, method_calls, source_snippet
+           FROM symbols
+          WHERE type = 'method'
+            AND id IN (SELECT rowid FROM symbols_fts WHERE symbols_fts MATCH ?)
+            AND ', ' || used_types || ', ' LIKE ? COLLATE NOCASE
+          LIMIT 20`
+      );
+      this.stmtCache.set("getApiUsagePatterns", stmt);
+    }
+    const methods = stmt.all(`{source_snippet} : "${safe}"`, `%, ${className}, %`);
+    if (methods.length === 0) {
+      return [];
+    }
+    const methodCallPatterns = {};
+    const initPatterns = [];
+    for (const method of methods) {
+      if (method.method_calls) {
+        for (const call of method.method_calls.split(",")) {
+          const c2 = call.trim();
+          if (c2) methodCallPatterns[c2] = (methodCallPatterns[c2] || 0) + 1;
+        }
+      }
+      if (method.source_snippet && method.source_snippet.includes("new " + className)) {
+        const snippet = method.source_snippet.split("\n").slice(0, 5).join("\n");
+        if (!initPatterns.includes(snippet)) initPatterns.push(snippet);
+      }
+    }
+    const commonMethodCalls = Object.entries(methodCallPatterns).sort(([, a], [, b]) => b - a).slice(0, 10);
+    return [{
+      patternType: "General Usage",
+      usageCount: methods.length,
+      classes: methods.map((m) => m.parent_name).filter(Boolean).slice(0, 10),
+      initialization: initPatterns.slice(0, 3),
+      methodSequence: commonMethodCalls.map(([name, count]) => `${name}  // called ${count}\xD7`),
+      relatedApis: commonMethodCalls.slice(0, 5).map(([name]) => name)
+    }];
+  }
+  /**
+   * Suggest missing methods for a class based on pattern analysis
+   */
+  suggestMissingMethods(className) {
+    const classSymbol = this.getSymbolByName(className, "class");
+    if (!classSymbol) return [];
+    const existingMethods = this.getClassMethods(className);
+    const existingMethodNames = new Set(existingMethods.map((m) => m.name));
+    let patternType = classSymbol.patternType || "Unknown";
+    if (!patternType || patternType === "Unknown") {
+      if (className.endsWith("Helper")) patternType = "Helper";
+      else if (className.endsWith("Service")) patternType = "Service";
+      else if (className.endsWith("Controller")) patternType = "Controller";
+    }
+    const sql = `
+      SELECT DISTINCT parent_name
+      FROM symbols
+      WHERE type = 'method'
+        AND parent_name LIKE ?
+        AND parent_name != ?
+      LIMIT 20
+    `;
+    const stmt = this.db.prepare(sql);
+    const similarClasses = stmt.all(`%${patternType}`, className);
+    const methodFrequency = {};
+    if (similarClasses.length > 0) {
+      const classNames = similarClasses.map((r) => r.parent_name);
+      const placeholders = classNames.map(() => "?").join(",");
+      const methodCounts = this.db.prepare(
+        `SELECT name, COUNT(DISTINCT parent_name) AS class_count
+         FROM symbols
+         WHERE type = 'method' AND parent_name IN (${placeholders})
+         GROUP BY name
+         ORDER BY class_count DESC
+         LIMIT 50`
+      ).all(...classNames);
+      for (const row of methodCounts) {
+        if (!existingMethodNames.has(row.name)) {
+          methodFrequency[row.name] = row.class_count;
+        }
+      }
+    }
+    return Object.entries(methodFrequency).sort(([, a], [, b]) => b - a).slice(0, 10).map(([name, count]) => ({
+      methodName: name,
+      frequency: count,
+      totalClasses: similarClasses.length,
+      percentage: Math.round(count / similarClasses.length * 100)
+    }));
+  }
+  /**
+   * Clear all symbols
+   */
+  clear() {
+    this.invalidateSymbolCounts();
+    this.db.exec("DELETE FROM symbols");
+    this.db.exec("DELETE FROM table_relations");
+    this.db.exec("DELETE FROM form_datasources");
+    this.db.exec("DELETE FROM form_patterns");
+    this.db.exec("DELETE FROM edt_metadata");
+    this.db.exec("DELETE FROM security_privilege_entries");
+    this.db.exec("DELETE FROM security_duty_privileges");
+    this.db.exec("DELETE FROM security_role_duties");
+    this.db.exec("DELETE FROM menu_item_targets");
+    this.db.exec("DELETE FROM extension_metadata");
+    this.db.exec("DELETE FROM service_operations");
+    this.db.exec("DELETE FROM service_group_members");
+    this.db.exec("DELETE FROM map_mappings");
+    this.db.exec("DELETE FROM security_policies");
+    this.db.exec("DELETE FROM macro_defines");
+    this.db.exec("DELETE FROM property_stats");
+    this.vacuum();
+  }
+  /**
+   * Clear symbols for specific models
+   * @param modelNames - Array of model names to clear
+   * @param shouldVacuum - Whether to run VACUUM after deletion (default: false for better incremental build performance)
+   */
+  clearModels(modelNames, shouldVacuum = false) {
+    if (modelNames.length === 0) return;
+    const placeholders = modelNames.map(() => "?").join(",");
+    this.invalidateSymbolCounts();
+    this.createFTSTriggers();
+    const deleteAll = this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM symbols WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM table_relations WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM form_datasources WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM form_patterns WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM edt_metadata WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM security_privilege_entries WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM security_duty_privileges WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM security_role_duties WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM menu_item_targets WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM extension_metadata WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM service_operations WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM service_group_members WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM map_mappings WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM security_policies WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM macro_defines WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM property_stats WHERE model IN (${placeholders})`).run(...modelNames);
+    });
+    deleteAll();
+    log.step(`Cleared symbols for models: ${modelNames.join(", ")}`);
+    if (shouldVacuum) {
+      log.step("Running VACUUM to optimize database...");
+      this.vacuum();
+      log.ok("VACUUM completed");
+    } else {
+      log.info("Skipping VACUUM for faster incremental build");
+    }
+  }
+  /**
+   * Vacuum the database to reclaim space after deletions
+   */
+  vacuum() {
+    this.db.exec("VACUUM");
+  }
+  /**
+   * Get candidate symbol names for fuzzy matching ("did you mean" suggestions).
+   *
+   * When a query is given, candidates are anchored to it: names sharing the
+   * query's leading characters plus names sharing its root term (avoids
+   * always sampling the same alphabetical slice of a 580K-symbol index).
+   * Without a query, falls back to the first 5000 names alphabetically.
+   *
+   * Both probes go through symbols_fts. `name LIKE '%root%'` cannot use any index
+   * — SQLite scans all 1.17M rows, synchronously, on exactly the path an agent hits
+   * when it guessed a name wrong, which it does routinely. FTS5 answers a prefix
+   * term from its term index instead. The trade is that infix candidates
+   * ("MyCustTable" for query "CustTable") are no longer offered; they scored below
+   * the 0.7 fuzzy threshold anyway, being far longer than the query.
+   */
+  getAllSymbolNames(query, limit = 2e3) {
+    const trimmed = query?.trim();
+    const cacheKey = `${trimmed ?? ""}|${limit}`;
+    const cached2 = this.suggestionNamesCache.get(cacheKey);
+    if (cached2) return cached2;
+    const names = this.computeSymbolNameCandidates(trimmed, limit);
+    if (this.suggestionNamesCache.size >= SUGGESTION_CACHE_ENTRIES) {
+      const oldest = this.suggestionNamesCache.keys().next().value;
+      if (oldest !== void 0) this.suggestionNamesCache.delete(oldest);
+    }
+    this.suggestionNamesCache.set(cacheKey, names);
+    return names;
+  }
+  computeSymbolNameCandidates(trimmed, limit) {
+    if (!trimmed) {
+      const stmt = this.db.prepare(`
+        SELECT DISTINCT name
+        FROM symbols
+        ORDER BY name
+        LIMIT 5000
+      `);
+      const names2 = [];
+      for (const row of stmt.iterate()) {
+        names2.push(row.name);
+      }
+      return names2;
+    }
+    const half = Math.max(1, Math.floor(limit / 2));
+    const ftsTerm = trimmed.replace(/[^a-zA-Z0-9]/g, "");
+    const prefix = ftsTerm.slice(0, 2);
+    const root = ftsTerm.slice(0, Math.max(3, Math.ceil(ftsTerm.length / 2)));
+    const names = /* @__PURE__ */ new Set();
+    const db = this.getReadDb();
+    if (prefix.length > 0) {
+      try {
+        const stmt = this.getReadStmt(db, "suggest_fts_prefix", () => `SELECT s.name FROM symbols_fts fts JOIN symbols s ON s.id = fts.rowid
+           WHERE symbols_fts MATCH ? LIMIT ?`);
+        for (const probe of /* @__PURE__ */ new Set([prefix, root])) {
+          for (const row of stmt.iterate(`{name} : "${probe}"*`, half)) {
+            names.add(row.name);
+          }
+        }
+        return [...names];
+      } catch {
+      }
+    }
+    const escapeLike = (value) => value.replace(/\\/g, "\\\\").replace(/[%_]/g, "\\$&");
+    try {
+      const prefixStmt = this.getReadStmt(db, "suggest_prefix", () => `SELECT DISTINCT name FROM symbols WHERE name LIKE ? ESCAPE '\\' LIMIT ?`);
+      for (const row of prefixStmt.iterate(`${escapeLike(trimmed.slice(0, 2))}%`, half)) {
+        names.add(row.name);
+      }
+    } catch {
+    }
+    return [...names];
+  }
+  /**
+   * Get symbols grouped by term (for relationship analysis)
+   * Returns a map of term -> symbols with that term
+   * Uses iterator to avoid loading all symbols into memory at once
+   *
+   * Memoized for the lifetime of the index contents: the query takes no arguments
+   * and hydrates the same 3000 rows every time, yet it sits on the failed-search
+   * path next to getAllSymbolNames — so every name an agent probes and misses paid
+   * for a fresh `SELECT *` of 3000 rows on the event loop.
+   */
+  getSymbolsByTerm() {
+    if (this.symbolsByTermCache) return this.symbolsByTermCache;
+    const built = this.computeSymbolsByTerm();
+    this.symbolsByTermCache = built;
+    return built;
+  }
+  computeSymbolsByTerm() {
+    const stmt = this.db.prepare(`
+      SELECT *
+      FROM symbols
+      WHERE used_types IS NOT NULL 
+         OR method_calls IS NOT NULL 
+         OR related_methods IS NOT NULL
+      ORDER BY name
+      LIMIT 3000
+    `);
+    const symbolsByTerm = /* @__PURE__ */ new Map();
+    for (const row of stmt.iterate()) {
+      const symbol = this.rowToSymbol(row);
+      const termLower = symbol.name.toLowerCase();
+      if (!symbolsByTerm.has(termLower)) {
+        symbolsByTerm.set(termLower, []);
+      }
+      symbolsByTerm.get(termLower).push(symbol);
+    }
+    return symbolsByTerm;
+  }
+  /**
+   * Get all symbols for relationship analysis
+   * Used to build term relationship graph
+   * Uses iterator to avoid memory exhaustion on large datasets
+   */
+  getAllSymbolsForAnalysis() {
+    const stmt = this.db.prepare(`
+      SELECT *
+      FROM symbols
+      WHERE used_types IS NOT NULL 
+         OR method_calls IS NOT NULL 
+         OR related_methods IS NOT NULL
+         OR parent_name IS NOT NULL
+         OR extends_class IS NOT NULL
+      LIMIT 2000
+    `);
+    const symbols = [];
+    for (const row of stmt.iterate()) {
+      symbols.push(this.rowToSymbol(row));
+    }
+    return symbols;
+  }
+  /**
+   * Close the database connection and release all pooled resources: the
+   * prepared-statement cache, writer + read pool, labels DB + its read pool,
+   * and any pending debounced labels FTS rebuild timer.
+   */
+  close() {
+    try {
+      this.flushLabelsFtsRebuild();
+    } catch (e) {
+      console.error(`[SymbolIndex] Final labels FTS flush failed: ${e}`);
+      this._labelsFtsTimer = null;
+    }
+    this.closeReadPool();
+    this.stmtCache.clear();
+    try {
+      this.db.close();
+    } catch {
+    }
+    try {
+      this.labelsDb.close();
+    } catch {
+    }
+  }
+  // Label methods
+  /**
+   * Add (or replace) a label entry in the index.
+   * Labels live in the separate `labelsDb` connection — NOT in the main symbols DB.
+   * The stmtCache is shared across connections so the cache key is namespaced to avoid
+   * accidentally reusing a statement prepared against a different DB handle.
+   */
+  addLabel(entry) {
+    let stmt = this.stmtCache.get("labels::addLabel");
+    if (!stmt) {
+      stmt = this.labelsDb.prepare(`
+        INSERT OR REPLACE INTO labels (label_id, label_file_id, model, language, text, comment, file_path_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      this.stmtCache.set("labels::addLabel", stmt);
+    }
+    stmt.run(
+      entry.labelId,
+      entry.labelFileId,
+      entry.model,
+      entry.language,
+      entry.text,
+      entry.comment ?? null,
+      this.labelFilePathId(entry.filePath)
+    );
+  }
+  /**
+   * Row id of `filePath` in `label_files`, inserting it if it is new.
+   *
+   * Memoised for the process: a bulk load calls this once per label but there is
+   * one distinct path per .label.txt (813 across a default en-US build of 374 K
+   * rows), so without the cache it would be ~374 K index probes to learn 813 answers.
+   * The cache is only ever added to — rows in label_files are never deleted, since a
+   * path that had labels once may have them again after the next scan and the table
+   * is trivially small either way.
+   */
+  labelFilePathId(filePath) {
+    const cached2 = this.labelFilePathIds.get(filePath);
+    if (cached2 !== void 0) return cached2;
+    let select = this.stmtCache.get("labels::selectFilePathId");
+    if (!select) {
+      select = this.labelsDb.prepare("SELECT id FROM label_files WHERE file_path = ?");
+      this.stmtCache.set("labels::selectFilePathId", select);
+    }
+    let insert = this.stmtCache.get("labels::insertFilePath");
+    if (!insert) {
+      insert = this.labelsDb.prepare("INSERT OR IGNORE INTO label_files (file_path) VALUES (?)");
+      this.stmtCache.set("labels::insertFilePath", insert);
+    }
+    let row = select.get(filePath);
+    if (!row) {
+      insert.run(filePath);
+      row = select.get(filePath);
+    }
+    if (!row) throw new Error(`Could not resolve label file path to an id: ${filePath}`);
+    this.labelFilePathIds.set(filePath, row.id);
+    return row.id;
+  }
+  /** filePath -> label_files.id, populated lazily by labelFilePathId(). */
+  labelFilePathIds = /* @__PURE__ */ new Map();
+  /**
+   * Bulk-insert labels (drops FTS triggers for speed).
+   * Pass `{ skipFtsRebuild: true }` when indexing many models sequentially;
+   * the caller must then invoke `rebuildLabelsFts()` once after all models are done.
+   */
+  bulkAddLabels(entries, opts) {
+    const keepTriggers = !!opts?.keepTriggers;
+    if (keepTriggers) {
+      this.labelsDb.pragma("recursive_triggers = ON");
+    } else {
+      this.labelsDb.exec(`DROP TRIGGER IF EXISTS labels_ai`);
+      this.labelsDb.exec(`DROP TRIGGER IF EXISTS labels_ad`);
+      this.labelsDb.exec(`DROP TRIGGER IF EXISTS labels_au`);
+    }
+    try {
+      const insert = this.labelsDb.prepare(`
+        INSERT OR REPLACE INTO labels (label_id, label_file_id, model, language, text, comment, file_path_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      const insertMany = this.labelsDb.transaction((rows) => {
+        for (const e of rows) {
+          insert.run(
+            e.labelId,
+            e.labelFileId,
+            e.model,
+            e.language,
+            e.text,
+            e.comment ?? null,
+            this.labelFilePathId(e.filePath)
+          );
+        }
+      });
+      insertMany(entries);
+      if (!keepTriggers && !opts?.skipFtsRebuild) {
+        this.rebuildLabelsFts();
+      }
+    } finally {
+      if (keepTriggers) {
+        this.labelsDb.pragma("recursive_triggers = OFF");
+      } else {
+        this.createLabelsFtsTriggers();
+      }
+    }
+  }
+  /**
+   * Rebuild the FTS index for labels from scratch — every row in `labels`, whatever
+   * its language.
+   *
+   * This used to filter to en-US on the theory that it was "the primary search
+   * language", which held only as long as nobody searched in another one. On a build
+   * with LABEL_LANGUAGES=en-US,cs,sk,de the other three quarters were unreachable
+   * through the index, and searchLabels quietly answered them with a LIKE scan of
+   * the whole table instead. The index is ~4x larger on such a build; the alternative
+   * was a 150 s query.
+   */
+  rebuildLabelsFts() {
+    this.labelsDb.exec(`INSERT INTO labels_fts(labels_fts) VALUES('delete-all')`);
+    this.labelsDb.exec(`
+      INSERT INTO labels_fts(rowid, label_id, text, comment)
+      SELECT id, label_id, text, comment FROM labels
+    `);
+  }
+  // Debounced labels FTS rebuild
+  _labelsFtsTimer = null;
+  static LABELS_FTS_SETTLE_MS = 300;
+  /**
+   * Schedule a debounced labels FTS rebuild.
+   * Multiple rapid create_label calls defer the expensive rebuild to ~300ms
+   * after the last insertion, so a batch of 5 labels triggers only 1 rebuild.
+   */
+  scheduleLabelsFtsRebuild() {
+    if (this._labelsFtsTimer) clearTimeout(this._labelsFtsTimer);
+    this._labelsFtsTimer = setTimeout(() => {
+      this._labelsFtsTimer = null;
+      try {
+        this.rebuildLabelsFts();
+        console.error("[SymbolIndex] Debounced labels FTS rebuild complete");
+      } catch (e) {
+        console.error(`[SymbolIndex] Debounced labels FTS rebuild failed: ${e}`);
+      }
+    }, _XppSymbolIndex.LABELS_FTS_SETTLE_MS);
+  }
+  /** Flush any pending labels FTS rebuild immediately (for tests / shutdown). */
+  flushLabelsFtsRebuild() {
+    if (this._labelsFtsTimer) {
+      clearTimeout(this._labelsFtsTimer);
+      this._labelsFtsTimer = null;
+      this.rebuildLabelsFts();
+    }
+  }
+  /**
+   * Full-text search labels within one language (default en-US).
+   *
+   * Answered from labels_fts, which covers every indexed locale. Only queries FTS5
+   * cannot tokenise fall through to the LIKE scan in searchLabelsLike.
+   */
+  searchLabels(query, opts = {}) {
+    const { language = "en-US", model, labelFileId, limit = 30 } = opts;
+    const ftsQuery = query.replace(/['"*()]/g, " ").trim();
+    if (/[_%]/.test(query) || !/[\p{L}\p{N}]/u.test(ftsQuery)) {
+      return this.searchLabelsLike(query, opts);
+    }
+    const stmtKey = `searchLabels_${model ? "model" : "nomodel"}_${labelFileId ? "lfid" : "nolfid"}`;
+    let stmt = this.labelsStmtCache.get(stmtKey);
+    if (!stmt) {
+      let sql = `
+        SELECT l.label_id AS labelId, l.label_file_id AS labelFileId, l.model, l.language,
+               l.text, l.comment, lf.file_path AS filePath,
+               f.rank
+        FROM labels_fts f
+        JOIN labels l ON l.id = f.rowid
+        JOIN label_files lf ON lf.id = l.file_path_id
+        WHERE labels_fts MATCH ?
+          AND LOWER(l.language) = ?`;
+      if (model) sql += `
+          AND l.model = ?`;
+      if (labelFileId) sql += `
+          AND l.label_file_id = ?`;
+      sql += `
+          ORDER BY f.rank
+          LIMIT ?`;
+      stmt = this.labelsDb.prepare(sql);
+      this.labelsStmtCache.set(stmtKey, stmt);
+    }
+    const params = [ftsQuery, language.toLowerCase()];
+    if (model) params.push(model);
+    if (labelFileId) params.push(labelFileId);
+    params.push(limit);
+    try {
+      return stmt.all(...params);
+    } catch {
+      return this.searchLabelsLike(query, opts);
+    }
+  }
+  /**
+   * LIKE-based fallback label search, for the queries FTS5 cannot tokenise
+   * (literal '_'/'%', or nothing but punctuation once sanitised).
+   *
+   * A leading-wildcard LIKE cannot use an index, so this scans the labels table.
+   * The language predicate is written to hit idx_labels_language_lower, which keeps
+   * the scan inside one locale instead of all of them; there is no way to make the
+   * text comparison itself cheaper here, which is exactly why the FTS path above now
+   * covers every language rather than only en-US.
+   */
+  searchLabelsLike(query, opts = {}) {
+    const { language = "en-US", model, labelFileId, limit = 30 } = opts;
+    const escaped = query.replace(/[\\%_]/g, "\\$&");
+    const pattern = `%${escaped}%`;
+    const stmtKey = `searchLabelsLike_${model ? "model" : "nomodel"}_${labelFileId ? "lfid" : "nolfid"}`;
+    let stmt = this.labelsStmtCache.get(stmtKey);
+    if (!stmt) {
+      let sql = `
+        SELECT l.label_id AS labelId, l.label_file_id AS labelFileId, l.model, l.language,
+               l.text, l.comment, lf.file_path AS filePath, 0 as rank
+        FROM labels l
+        JOIN label_files lf ON lf.id = l.file_path_id
+        WHERE (l.text LIKE ? ESCAPE '\\' OR l.label_id LIKE ? ESCAPE '\\')
+          AND LOWER(l.language) = ?`;
+      if (model) sql += `
+          AND l.model = ?`;
+      if (labelFileId) sql += `
+          AND l.label_file_id = ?`;
+      sql += `
+        LIMIT ?`;
+      stmt = this.labelsDb.prepare(sql);
+      this.labelsStmtCache.set(stmtKey, stmt);
+    }
+    const params = [pattern, pattern, language.toLowerCase()];
+    if (model) params.push(model);
+    if (labelFileId) params.push(labelFileId);
+    params.push(limit);
+    return stmt.all(...params);
+  }
+  /**
+   * Get a single label by ID (returns all languages).
+   *
+   * The ID may be spelled any way the rest of the server emits it: a reference
+   * (`@ContosoExt:EquipmentName`, `@GLS4170035`, even the doubled
+   * `@SYS:@SYS67433`) or the bare key. #888: matching the caller's string
+   * against the stored one verbatim made the natural spelling fail for the 27
+   * legacy label files, whose keys are stored WITH the sigil — 61% of the
+   * indexed rows — and `search` output, which is always a reference, was never
+   * valid input here. Both branches of the IN-list still use `idx_labels_id`
+   * (and `idx_labels_unique` once the file/model filters are added), so the
+   * widening costs nothing; see labelIdSpellings for why the sigil is not
+   * normalised away at storage time instead.
+   *
+   * Rows come back with the id EXACTLY as stored, which is the spelling
+   * callers must keep using for anything that reads the .label.txt (see
+   * labelMissingOnDisk) or writes a reference.
+   */
+  getLabelById(labelId, labelFileId, model) {
+    const parsed = parseLabelReference(labelId);
+    const spellings = labelIdSpellings(parsed.labelId);
+    if (spellings.length === 0) return [];
+    const fileFilter = labelFileId ?? parsed.labelFileId;
+    const params = [...spellings];
+    let sql = `
+      SELECT l.label_id AS labelId, l.label_file_id AS labelFileId, l.model, l.language,
+             l.text, l.comment, lf.file_path AS filePath
+      FROM labels l
+      JOIN label_files lf ON lf.id = l.file_path_id
+      WHERE l.label_id IN (${spellings.map(() => "?").join(", ")})
+    `;
+    if (fileFilter) {
+      sql += ` AND l.label_file_id = ?`;
+      params.push(fileFilter);
+    }
+    if (model) {
+      sql += ` AND l.model = ?`;
+      params.push(model);
+    }
+    sql += ` ORDER BY l.language`;
+    return this.labelsDb.prepare(sql).all(...params);
+  }
+  /**
+   * Get all label file IDs for a model (i.e. which AxLabelFiles exist).
+   *
+   * Both filters belong in SQL. `labelFileId` used to be applied by the caller to
+   * the finished list, so asking about ONE label file still grouped all 1.4 M rows
+   * into 1602 groups and then threw 1601 of them away — a full index scan measured
+   * at 2.5 s warm, and one cold call in a real session took 28 s against the 40-170 ms
+   * every other call to the same tool costs. Pushed into the WHERE clause the same
+   * lookup is a seek on idx_labels_file_id: 0.4 ms.
+   */
+  getLabelFileIds(model, labelFileId) {
+    const run = (extraWhere, params2) => this.labelsDb.prepare(`
+      SELECT label_file_id AS labelFileId, model, GROUP_CONCAT(DISTINCT language) AS languages
+      FROM labels
+      ${extraWhere}
+      GROUP BY label_file_id, model
+      ORDER BY label_file_id
+    `).all(...params2);
+    const where = [];
+    const params = [];
+    if (model) {
+      where.push("model = ?");
+      params.push(model);
+    }
+    if (labelFileId) {
+      where.push("label_file_id = ?");
+      params.push(labelFileId);
+    }
+    const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const hits = run(clause, params);
+    if (hits.length > 0 || !labelFileId) return hits;
+    const nocaseWhere = ["label_file_id = ? COLLATE NOCASE"];
+    const nocaseParams = [labelFileId];
+    if (model) {
+      nocaseWhere.unshift("model = ?");
+      nocaseParams.unshift(model);
+    }
+    return run(`WHERE ${nocaseWhere.join(" AND ")}`, nocaseParams);
+  }
+  /**
+   * Get the physical .label.txt file path for each language of a label file.
+   * Used by labels(action="info", labelFileId=…) so callers get the on-disk
+   * location per language instead of having to shell out to find it.
+   */
+  getLabelFilePaths(labelFileId, model) {
+    const params = [labelFileId];
+    let sql = `
+      SELECT DISTINCT l.language, lf.file_path AS filePath, l.model
+      FROM labels l
+      JOIN label_files lf ON lf.id = l.file_path_id
+      WHERE l.label_file_id = ? AND lf.file_path IS NOT NULL AND lf.file_path != ''
+    `;
+    if (model) {
+      sql += ` AND l.model = ?`;
+      params.push(model);
+    }
+    sql += ` ORDER BY l.language`;
+    return this.labelsDb.prepare(sql).all(...params);
+  }
+  /**
+   * Remove all labels for the given models (used during incremental rebuild)
+   */
+  clearLabelsForModels(models, opts) {
+    const placeholders = models.map(() => "?").join(",");
+    this.labelsDb.prepare(`DELETE FROM labels WHERE model IN (${placeholders})`).run(...models);
+    if (opts?.ftsStrategy !== "incremental") this.rebuildLabelsFts();
+  }
+  /**
+   * Total label count
+   */
+  getLabelCount() {
+    const row = this.labelsDb.prepare(`SELECT COUNT(*) AS cnt FROM labels`).get();
+    return row?.cnt ?? 0;
+  }
+  /**
+   * Rename a label ID in the index (used by rename_label tool).
+   * Updates all rows for the given labelId + labelFileId + model combination.
+   *
+   * No FTS rebuild: the `labels_au` trigger deletes the old term and inserts the new
+   * one for each updated row, which is the whole of the work a rebuild would redo.
+   * This used to call rebuildLabelsFts() afterwards — re-tokenising every label in
+   * the database (~105 s on the production DB) to reflect a handful of renamed rows,
+   * and because node:sqlite is synchronous the server answered nothing for its whole
+   * duration. create_label and update_symbol_index were moved off that pattern
+   * earlier; this was the last caller still on it.
+   */
+  renameLabelInIndex(oldLabelId, newLabelId, labelFileId, model) {
+    this.labelsDb.prepare(`
+      UPDATE labels
+      SET label_id = ?
+      WHERE label_id = ?
+        AND label_file_id = ?
+        AND model = ?
+    `).run(newLabelId, oldLabelId, labelFileId, model);
+  }
+};
+
+// src/metadata/labelParser.ts
+import * as fs3 from "fs/promises";
+import * as fsSync from "fs";
+import * as path2 from "path";
+
+// src/utils/concurrency.ts
+import * as os from "os";
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+function defaultFileConcurrency() {
+  let hosts;
+  try {
+    hosts = typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length;
+  } catch {
+    hosts = 4;
+  }
+  return Math.max(2, Math.min(24, hosts));
+}
+
+// src/metadata/labelParser.ts
+var DEFAULT_LABEL_LANGUAGES = settingByEnv("LABEL_LANGUAGES").default.join(",");
+function parseLabelFile(content, labelFileId, model, language, filePath) {
+  const labels = [];
+  const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  let current = null;
+  for (const line of lines) {
+    if (line === "") continue;
+    if (line.startsWith(" ;") || line.startsWith("	;")) {
+      if (current) {
+        const commentText = line.replace(/^[ \t];/, "").trim();
+        current.comment = current.comment ? `${current.comment} ${commentText}` : commentText;
+      }
+      continue;
+    }
+    const eqIdx = line.indexOf("=");
+    if (eqIdx > 0) {
+      if (current) labels.push(current);
+      const labelId = line.substring(0, eqIdx).trim();
+      const text = line.substring(eqIdx + 1);
+      if (!labelId || /\s/.test(labelId)) {
+        current = null;
+        continue;
+      }
+      current = { labelId, text, comment: void 0, labelFileId, model, language, filePath };
+    }
+  }
+  if (current) labels.push(current);
+  return labels;
+}
+async function discoverLabelFiles(modelDir) {
+  const results = [];
+  let axLabelDir = path2.join(modelDir, "AxLabelFile", "LabelResources");
+  if (!fsSync.existsSync(axLabelDir)) {
+    axLabelDir = path2.join(modelDir, "axlabelfile", "LabelResources");
+    if (!fsSync.existsSync(axLabelDir)) {
+      axLabelDir = path2.join(modelDir, "axlabelfile", "labelresources");
+    }
+  }
+  const langConfig = process.env.LABEL_LANGUAGES || DEFAULT_LABEL_LANGUAGES;
+  const SUPPORTED_LANGUAGES = langConfig.toLowerCase() === "all" ? null : new Set(langConfig.split(",").map((l) => l.trim()));
+  let locales;
+  try {
+    locales = await fs3.readdir(axLabelDir);
+  } catch {
+    return results;
+  }
+  for (const locale of locales) {
+    if (SUPPORTED_LANGUAGES) {
+      const normalizedLocale = locale.toLowerCase();
+      const isSupported = Array.from(SUPPORTED_LANGUAGES).some(
+        (supported) => supported.toLowerCase() === normalizedLocale
+      );
+      if (!isSupported) {
+        continue;
+      }
+    }
+    const localeDir = path2.join(axLabelDir, locale);
+    let files;
+    try {
+      files = await fs3.readdir(localeDir);
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      if (!file.endsWith(".label.txt")) continue;
+      const withoutSuffix = file.replace(/\.label\.txt$/, "");
+      const dotIdx = withoutSuffix.lastIndexOf(".");
+      if (dotIdx < 0) continue;
+      const labelFileId = withoutSuffix.substring(0, dotIdx);
+      const fileLang = withoutSuffix.substring(dotIdx + 1);
+      if (fileLang.toLowerCase() !== locale.toLowerCase()) continue;
+      results.push({
+        labelFileId,
+        // Normalize to BCP-47 canonical casing (e.g. 'en-us' -> 'en-US').
+        language: locale.split("-").map((part, i) => i === 0 ? part.toLowerCase() : part.toUpperCase()).join("-"),
+        filePath: path2.join(localeDir, file)
+      });
+    }
+  }
+  return results;
+}
+async function indexModelLabels(symbolIndex, modelDir, model, opts) {
+  const labelFiles = await discoverLabelFiles(modelDir);
+  if (labelFiles.length === 0) return 0;
+  const allEntries = [];
+  const perFile = await mapWithConcurrency(
+    labelFiles,
+    defaultFileConcurrency(),
+    async ({ labelFileId, language, filePath }) => {
+      let content;
+      try {
+        content = await fs3.readFile(filePath, "utf-8");
+      } catch {
+        return [];
+      }
+      return parseLabelFile(content, labelFileId, model, language, filePath);
+    }
+  );
+  for (const labels of perFile) {
+    for (const lbl of labels) {
+      allEntries.push({
+        labelId: lbl.labelId,
+        labelFileId: lbl.labelFileId,
+        model: lbl.model,
+        language: lbl.language,
+        text: lbl.text,
+        comment: lbl.comment,
+        filePath: lbl.filePath
+      });
+    }
+  }
+  if (allEntries.length > 0) {
+    symbolIndex.bulkAddLabels(allEntries, opts);
+  }
+  return allEntries.length;
+}
+async function indexAllLabels(symbolIndex, packagesPath, modelFilter, opts) {
+  const incrementalFts = opts?.ftsStrategy === "incremental";
+  let totalLabels = 0;
+  let modelsIndexed = 0;
+  let models;
+  try {
+    const entries = fsSync.readdirSync(packagesPath, { withFileTypes: true });
+    models = entries.filter((e) => e.isDirectory() || e.isSymbolicLink()).map((e) => e.name);
+  } catch {
+    console.error(`[LabelParser] Cannot read packages path: ${packagesPath}`);
+    return { totalLabels, modelsIndexed, ftsRebuildPending: false };
+  }
+  let skippedByFilter = 0;
+  let skippedMissingDir = 0;
+  let skippedNoLabels = 0;
+  for (const packageOrModel of models) {
+    const packageDir = path2.join(packagesPath, packageOrModel);
+    const modelDirs = [];
+    try {
+      const subDirs = fsSync.readdirSync(packageDir, { withFileTypes: true }).filter((e) => e.isDirectory() || e.isSymbolicLink()).map((e) => e.name).filter((n) => n !== "Descriptor" && n !== "bin" && !n.startsWith("."));
+      for (const subDir of subDirs) {
+        const candidateDir = path2.join(packageDir, subDir);
+        const axLabelDirOriginal = path2.join(candidateDir, "AxLabelFile");
+        const axLabelDirLower = path2.join(candidateDir, "axlabelfile");
+        if (fsSync.existsSync(axLabelDirOriginal) || fsSync.existsSync(axLabelDirLower)) {
+          modelDirs.push({ modelDir: candidateDir, modelName: subDir });
+        }
+      }
+    } catch {
+    }
+    if (modelDirs.length === 0) {
+      const flatAxLabel = path2.join(packageDir, "AxLabelFile");
+      const flatAxLabelLower = path2.join(packageDir, "axlabelfile");
+      if (fsSync.existsSync(flatAxLabel) || fsSync.existsSync(flatAxLabelLower)) {
+        modelDirs.push({ modelDir: packageDir, modelName: packageOrModel });
+      }
+    }
+    if (modelDirs.length === 0) {
+      skippedMissingDir++;
+      continue;
+    }
+    for (const { modelDir, modelName } of modelDirs) {
+      if (modelFilter && !modelFilter(modelName)) {
+        skippedByFilter++;
+        continue;
+      }
+      const count = await indexModelLabels(symbolIndex, modelDir, modelName, {
+        skipFtsRebuild: true,
+        keepTriggers: incrementalFts
+      });
+      if (count > 0) {
+        totalLabels += count;
+        modelsIndexed++;
+      } else {
+        skippedNoLabels++;
+      }
+    }
+  }
+  const ftsRebuildPending = totalLabels > 0 && !incrementalFts;
+  if (ftsRebuildPending && !opts?.skipFtsRebuild) {
+    symbolIndex.rebuildLabelsFts();
+  }
+  if (modelsIndexed === 0) {
+    console.log(`   \u2139\uFE0F  No labels indexed:`);
+    console.log(`      - Models skipped by filter: ${skippedByFilter}`);
+    console.log(`      - Models with missing directory: ${skippedMissingDir}`);
+    console.log(`      - Models with no labels: ${skippedNoLabels}`);
+    console.log(`      - Total models found: ${models.length}`);
+  }
+  return {
+    totalLabels,
+    modelsIndexed,
+    ftsRebuildPending: ftsRebuildPending && !!opts?.skipFtsRebuild
+  };
+}
+
+// src/utils/packagesRoot.ts
+import * as fs4 from "fs";
+var FALLBACK_PACKAGES_ROOT = "C:\\AosService\\PackagesLocalDirectory";
+var PREFERRED_DRIVES = ["C", "K", "J", "I"];
+var SCANNED_DRIVES = "CDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+var realIo = {
+  // Read through to process.platform on every access rather than snapshotting it
+  // at import time — a frozen copy makes the scan ignore a platform override, so
+  // the "not on Windows" path can only be exercised on a non-Windows machine and
+  // the corresponding test silently passes on CI while failing on a real VM.
+  get platform() {
+    return process.platform;
+  },
+  isDirectory(target) {
+    try {
+      return fs4.statSync(target).isDirectory();
+    } catch {
+      return false;
+    }
+  },
+  readDir(target) {
+    try {
+      return fs4.readdirSync(target);
+    } catch {
+      return [];
+    }
+  }
+};
+function plausibility(root, io) {
+  const entries = io.readDir(root);
+  if (entries.length === 0) return 0;
+  if (entries.some((e) => e.toLowerCase() === "bin")) return 2;
+  return 1;
+}
+function scanPackagesRoots(io = realIo) {
+  if (io.platform !== "win32") return [];
+  const hits = [];
+  for (const letter of SCANNED_DRIVES) {
+    if (!io.isDirectory(`${letter}:\\`)) continue;
+    const root = `${letter}:\\AosService\\PackagesLocalDirectory`;
+    if (!io.isDirectory(root)) continue;
+    const preferred = PREFERRED_DRIVES.indexOf(letter);
+    hits.push({
+      root,
+      score: plausibility(root, io),
+      rank: preferred === -1 ? PREFERRED_DRIVES.length : preferred
+    });
+  }
+  return hits.sort((a, b) => b.score - a.score || a.rank - b.rank || a.root.localeCompare(b.root)).map((hit) => hit.root);
+}
+var cached = null;
+function packagesRoots() {
+  if (cached === null) cached = scanPackagesRoots();
+  return cached;
+}
+function findPackagesRoot() {
+  return packagesRoots()[0] ?? null;
+}
+function defaultPackagesRoot() {
+  return findPackagesRoot() ?? FALLBACK_PACKAGES_ROOT;
+}
+
+// scripts/build-fts.ts
+import { fileURLToPath as fileURLToPath2 } from "url";
+import * as path3 from "path";
+var __filename = fileURLToPath2(import.meta.url);
+var __dirname = path3.dirname(__filename);
+var OUTPUT_DB = process.env.DB_PATH || "./data/xpp-metadata.db";
+var OUTPUT_LABELS_DB = process.env.LABELS_DB_PATH || "./data/xpp-metadata-labels.db";
+var PACKAGES_PATH = process.env.D365FO_PACKAGE_PATH || process.env.PACKAGES_PATH || defaultPackagesRoot();
+var INCLUDE_LABELS = process.env.INCLUDE_LABELS !== "false";
+var EXTRACT_MODE = process.env.EXTRACT_MODE || "all";
+async function buildFts() {
+  console.log("\u{1F50D} Phase 2: Building FTS index + labels");
+  console.log(`\u{1F4BE} Database: ${OUTPUT_DB}`);
+  console.log(`\u{1F4BE} Labels DB: ${OUTPUT_LABELS_DB}`);
+  console.log(`\u2699\uFE0F  Extract mode: ${EXTRACT_MODE}`);
+  console.log("");
+  if (!fsSync2.existsSync(OUTPUT_DB)) {
+    console.error(`\u274C Database not found at: ${OUTPUT_DB}`);
+    console.error('   Run "npm run build-database" (with SKIP_FTS=true) first.');
+    process.exit(1);
+  }
+  const symbolIndex = new XppSymbolIndex(OUTPUT_DB, OUTPUT_LABELS_DB);
+  symbolIndex.closeReadPool();
+  symbolIndex.db.pragma("journal_mode = MEMORY");
+  symbolIndex.db.pragma("synchronous = OFF");
+  symbolIndex.db.pragma("locking_mode = EXCLUSIVE");
+  symbolIndex.db.pragma("cache_size = -64000");
+  symbolIndex.db.pragma("temp_store = MEMORY");
+  symbolIndex.db.pragma("mmap_size = 268435456");
+  symbolIndex.labelsDb.pragma("journal_mode = MEMORY");
+  symbolIndex.labelsDb.pragma("synchronous = OFF");
+  symbolIndex.labelsDb.pragma("locking_mode = EXCLUSIVE");
+  symbolIndex.labelsDb.pragma("cache_size = -64000");
+  symbolIndex.labelsDb.pragma("temp_store = MEMORY");
+  symbolIndex.labelsDb.pragma("mmap_size = 268435456");
+  const totalStart = Date.now();
+  symbolIndex.rebuildFTS();
+  if (INCLUDE_LABELS) {
+    console.log(`
+\u{1F3F7}\uFE0F  Indexing AxLabelFile labels from: ${PACKAGES_PATH}/{Model}/{Model}/AxLabelFile/...`);
+    if (!fsSync2.existsSync(PACKAGES_PATH)) {
+      console.log(`   \u26A0\uFE0F  PackagesLocalDirectory not found at "${PACKAGES_PATH}" \u2014 skipping labels.`);
+      console.log(`   \u2139\uFE0F  Set D365FO_PACKAGE_PATH env var to the correct path, or INCLUDE_LABELS=false to suppress.`);
+    } else {
+      const labelStart = Date.now();
+      let labelModelFilter;
+      if (EXTRACT_MODE === "custom") {
+        labelModelFilter = (m) => isCustomModel(m);
+      } else if (EXTRACT_MODE === "standard") {
+        labelModelFilter = (m) => isStandardModel(m);
+      }
+      const droppedIndexes = symbolIndex.dropLabelSecondaryIndexes();
+      let totalLabels = 0;
+      let modelsIndexed = 0;
+      let ftsPending = false;
+      let indexMs = 0;
+      try {
+        ({ totalLabels, modelsIndexed, ftsRebuildPending: ftsPending } = await indexAllLabels(
+          symbolIndex,
+          PACKAGES_PATH,
+          labelModelFilter,
+          { skipFtsRebuild: true }
+        ));
+      } finally {
+        indexMs = symbolIndex.createLabelSecondaryIndexes(droppedIndexes);
+      }
+      const insertDuration = ((Date.now() - labelStart) / 1e3).toFixed(2);
+      console.log(`   \u2705 ${totalLabels} label entries indexed across ${modelsIndexed} models in ${insertDuration}s`);
+      console.log(`   \u{1F511} Label indexes rebuilt in ${(indexMs / 1e3).toFixed(2)}s`);
+      if (ftsPending) {
+        const ftsStart = Date.now();
+        symbolIndex.rebuildLabelsFts();
+        console.log(`   \u{1F50D} Labels FTS rebuilt in ${((Date.now() - ftsStart) / 1e3).toFixed(2)}s`);
+      }
+      const labelDuration = ((Date.now() - labelStart) / 1e3).toFixed(2);
+      console.log(`   \u23F1\uFE0F  Label phase total: ${labelDuration}s`);
+      const labelCount2 = symbolIndex.getLabelCount();
+      console.log(`   \u{1F4CA} Total labels in database: ${labelCount2}`);
+    }
+  } else {
+    console.log("\n\u23ED\uFE0F  Skipping label indexing (INCLUDE_LABELS=false)");
+  }
+  console.log("\n\u{1F504} Converting databases to WAL mode for production...");
+  symbolIndex.db.pragma("locking_mode = NORMAL");
+  symbolIndex.db.pragma("journal_mode = WAL");
+  symbolIndex.db.pragma("synchronous = NORMAL");
+  symbolIndex.labelsDb.pragma("locking_mode = NORMAL");
+  symbolIndex.labelsDb.pragma("journal_mode = WAL");
+  symbolIndex.labelsDb.pragma("synchronous = NORMAL");
+  console.log("\u2705 Databases converted to WAL mode");
+  symbolIndex.runPostBuildTasks();
+  const totalDuration = ((Date.now() - totalStart) / 1e3).toFixed(1);
+  const symbolCount = symbolIndex.getSymbolCount();
+  const labelCount = symbolIndex.getLabelCount();
+  console.log(`
+\u{1F4CA} Final statistics:`);
+  console.log(`   Symbols: ${symbolCount}`);
+  console.log(`   Labels:  ${labelCount}`);
+  console.log(`   Total Phase 2 time: ${totalDuration}s`);
+  symbolIndex.close();
+}
+buildFts().catch((error) => {
+  console.error("\u274C Fatal error:", error);
+  process.exit(1);
+});

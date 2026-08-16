@@ -1,0 +1,403 @@
+/**
+ * Custom HTTP Transport for MCP over Azure Web Service.
+ * Uses direct JSON responses (not SSE streaming) for Azure orchestrator compatibility.
+ */
+import { apiRateLimiter } from '../middleware/rateLimiter.js';
+import { getConfigManager } from '../utils/configManager.js';
+import { buildProgressMessage } from '../utils/toolProgressMessage.js';
+/**
+ * Per-request timeout for the HTTP transport (ms). Default 120s stays well below
+ * Azure's 230s request limit while allowing for slower SMB-backed SQLite I/O.
+ */
+const TOOL_TIMEOUT_MS = Math.max(10_000, parseInt(process.env.MCP_TOOL_TIMEOUT_MS || '120000', 10) || 120_000);
+/**
+ * Per-tool timeout classes so fast tools don't wait out a hung call's full
+ * timeout and heavy tools (build/db-sync/systest) aren't killed prematurely.
+ * All values can be overridden via env.
+ */
+const TOOL_TIMEOUT_FAST_MS = Math.max(5_000, parseInt(process.env.MCP_TOOL_TIMEOUT_FAST_MS || '30000', 10) || 30_000);
+const TOOL_TIMEOUT_HEAVY_MS = Math.max(60_000, parseInt(process.env.MCP_TOOL_TIMEOUT_HEAVY_MS || '600000', 10) || 600_000);
+const HEAVY_TOOLS = new Set([
+    'build_d365fo_project',
+    'trigger_db_sync',
+    'run_bp_check',
+    'run_systest_class',
+    'update_symbol_index',
+]);
+const FAST_TOOLS = new Set([
+    'search',
+    'get_object_info',
+    'get_method',
+    'extension_info', 'security_info',
+    // `labels` excluded: write actions (create/rename) can scan many files.
+]);
+function resolveToolTimeout(toolName) {
+    if (!toolName)
+        return TOOL_TIMEOUT_MS;
+    if (HEAVY_TOOLS.has(toolName))
+        return TOOL_TIMEOUT_HEAVY_MS;
+    if (FAST_TOOLS.has(toolName))
+        return TOOL_TIMEOUT_FAST_MS;
+    return TOOL_TIMEOUT_MS;
+}
+/**
+ * Extract workspace folder path from GitHub Copilot MCP request (HTTP headers or
+ * params._meta). Returns a local file-system path (converts file:// URI → path).
+ */
+function extractWorkspaceFromRequest(req, requestBody) {
+    const headerCandidates = [
+        req.headers['x-vscode-workspace-folder-uris'],
+        req.headers['x-vscode-workspace-folder'],
+        req.headers['x-github-copilot-workspace'],
+        req.headers['x-workspace-folder'],
+        req.headers['x-workspace'],
+    ];
+    for (const h of headerCandidates) {
+        const val = Array.isArray(h) ? h[0] : h;
+        if (val) {
+            const path = fileUriToPath(val.split(',')[0].trim());
+            if (path)
+                return path;
+        }
+    }
+    const meta = requestBody.params?._meta;
+    if (meta) {
+        for (const key of ['workspaceFolders', 'workspaceFolderUris', 'roots']) {
+            const val = meta[key];
+            if (Array.isArray(val) && val.length > 0) {
+                const first = typeof val[0] === 'string' ? val[0] : val[0]?.uri;
+                const path = fileUriToPath(first);
+                if (path)
+                    return path;
+            }
+        }
+        for (const key of ['workspaceFolderUri', 'workspaceFolder', 'workspacePath']) {
+            const val = meta[key];
+            if (typeof val === 'string') {
+                const path = fileUriToPath(val);
+                if (path)
+                    return path;
+            }
+        }
+    }
+    return null;
+}
+/** Convert file:// URI to a local path, or return the string as-is if not a URI */
+function fileUriToPath(uri) {
+    if (!uri)
+        return null;
+    if (uri.startsWith('file:///')) {
+        const decoded = decodeURIComponent(uri.slice('file:///'.length));
+        if (process.platform === 'win32') {
+            // file:///K:/VSProjects/... → K:\VSProjects\...
+            return decoded.replace(/\//g, '\\');
+        }
+        // POSIX: file:///home/user/proj → /home/user/proj
+        return '/' + decoded;
+    }
+    if (uri.startsWith('file://')) {
+        const decoded = decodeURIComponent(uri.slice('file://'.length));
+        return process.platform === 'win32' ? decoded.replace(/\//g, '\\') : decoded;
+    }
+    // Already a local path — Windows drive letter or UNC, or POSIX absolute
+    if (uri.length > 2 && (uri[1] === ':' || uri.startsWith('\\\\') || uri.startsWith('/'))) {
+        return uri;
+    }
+    return null;
+}
+export class CustomHttpTransport {
+    server;
+    app;
+    context;
+    pendingRequests = new Map();
+    // Transport interface properties
+    onmessage;
+    onerror;
+    onclose;
+    constructor(server, app, context) {
+        this.server = server;
+        this.app = app;
+        this.context = context;
+        this.setupRoutes();
+        // Connect server immediately (must be done before handling requests)
+        this.connectServer().catch(err => {
+            process.stderr.write(`Failed to connect server: ${err}\n`);
+        });
+    }
+    /**
+     * Connects MCP server to this transport
+     * CRITICAL: Must be called for proper protocol lifecycle and completion signaling
+     */
+    async connectServer() {
+        await this.server.connect(this);
+    }
+    // Transport interface methods
+    async start() {
+        // HTTP transport doesn't need explicit start
+    }
+    async close() {
+        // Reject all in-flight promises so their awaiting callers fail fast
+        // instead of hanging until the per-request timeout fires.
+        const err = new Error('Transport closed');
+        for (const { reject } of this.pendingRequests.values()) {
+            reject(err);
+        }
+        this.pendingRequests.clear();
+    }
+    async send(message) {
+        // Route response to the correct pending request by id
+        if ('id' in message && message.id !== undefined && message.id !== null) {
+            const pending = this.pendingRequests.get(message.id);
+            if (pending) {
+                pending.resolve(message);
+                this.pendingRequests.delete(message.id);
+                return;
+            }
+        }
+        // Notifications / server-initiated messages with no id — nothing to route
+    }
+    setupRoutes() {
+        // Apply rate limiting
+        this.app.use('/mcp', apiRateLimiter);
+        // MCP endpoint - direct JSON-RPC
+        this.app.post('/mcp', async (req, res) => {
+            // Declare here so the catch block can clean it up regardless of where an error fires
+            let internalId;
+            // Hoisted for the same reason. An error raised after the timer is armed but
+            // outside the resolve/reject paths (e.g. from the surrounding context
+            // wrapper) would otherwise leave a live timer holding the event loop for up
+            // to the heavy-tool ceiling of 10 minutes.
+            let responseTimeoutId;
+            // Captured before any id rewriting below. `request` IS `req.body`, so once
+            // the id is swapped for the internal routing key, reading it back in the
+            // catch block would answer with that key — and a client that gets an error
+            // tagged with an id it never sent cannot correlate it, so it waits out its
+            // own timeout instead of failing fast.
+            const clientRequestId = req.body?.id ?? null;
+            try {
+                // Set response headers (keep-alive enabled for performance)
+                res.setHeader('Content-Type', 'application/json');
+                const request = req.body;
+                // Extract GitHub Copilot workspace path for per-request isolation.
+                // We no longer mutate the global ConfigManager singleton — instead both
+                // onmessage call-sites below run inside runWithRequestContext so concurrent
+                // requests from different users never bleed their workspacePath through
+                // the shared runtimeContext.
+                const workspacePath = extractWorkspaceFromRequest(req, request);
+                const requestCtx = workspacePath ? { workspacePath } : {};
+                if (!request.jsonrpc || !request.method) {
+                    res.status(400).json({
+                        jsonrpc: '2.0',
+                        error: {
+                            code: -32600,
+                            message: 'Invalid Request: missing jsonrpc or method',
+                        },
+                        id: null,
+                    });
+                    return;
+                }
+                // Handle notifications (no response expected)
+                if (!('id' in request)) {
+                    // Handle special notifications
+                    if (request.method === 'notifications/cancelled' ||
+                        request.method === 'cancelled') {
+                        // A cancelled notification does NOT close the transport.
+                        // It signals that a specific in-flight request was cancelled by the client,
+                        // but the HTTP connection (per-request) is already done.  Simply acknowledge.
+                        res.status(202).json({ status: 'accepted' });
+                        return;
+                    }
+                    if (request.method === 'shutdown') {
+                        // In HTTP mode each request is independent — there is no persistent connection
+                        // to tear down.  Calling onclose() here would stop the entire server for ALL
+                        // concurrent users, which is wrong.  Acknowledge and do nothing else.
+                        res.status(202).json({ status: 'accepted', completed: true });
+                        return;
+                    }
+                    if (this.onmessage) {
+                        // Notifications don't need response routing, but they DO need the correct
+                        // per-request workspacePath context so tool dispatch is consistent.
+                        getConfigManager().runWithRequestContext(requestCtx, () => {
+                            this.onmessage(request);
+                            return Promise.resolve();
+                        }).catch(() => { });
+                    }
+                    res.status(202).json({ status: 'accepted' });
+                    return;
+                }
+                // Handle requests - send to MCP server via onmessage
+                // Wait for response via Promise
+                if (this.onmessage) {
+                    // MCP capability-probe methods that always return "Method not found" — log silently
+                    const SILENT_PROBES = new Set([
+                        'resources/templates/list',
+                        'resources/list',
+                        'prompts/list',
+                        'logging/setLevel',
+                        'completion/complete',
+                    ]);
+                    const isSilentProbe = SILENT_PROBES.has(request.method);
+                    // Log incoming request (skip silent probes)
+                    const toolName = request.params?.name || request.method;
+                    const args = request.params?.arguments;
+                    const argsSummary = args ? ` (${Object.keys(args).join(', ')})` : '';
+                    // Short request ID tag for disambiguating concurrent requests in the log
+                    const reqId = String(request.id).slice(-4);
+                    const tag = `[${reqId}]`;
+                    if (!isSilentProbe) {
+                        process.stdout.write(`\n→ ${tag} ${toolName}${argsSummary}\n`);
+                    }
+                    const responsePromise = new Promise((resolve, reject) => {
+                        // Use a unique internal key so concurrent requests from different clients
+                        // with identical JSON-RPC ids (e.g. both sending id=1) never collide.
+                        // We swap the request.id to this unique key before handing it to the MCP
+                        // server, so the response comes back with the same unique key and we can
+                        // route it back to the correct resolver. The original client id is restored
+                        // in the response before it is sent to the HTTP client.
+                        internalId = `__t_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+                        const originalId = request.id;
+                        request.id = internalId;
+                        // Resolve the timeout class for this specific tool call so slow tools
+                        // (build / db-sync) aren't killed and fast tools don't starve the slot
+                        // for the full global ceiling.
+                        const perToolTimeoutMs = resolveToolTimeout(toolName);
+                        const timeoutId = setTimeout(() => {
+                            if (this.pendingRequests.has(internalId)) {
+                                this.pendingRequests.delete(internalId);
+                                request.id = originalId; // restore on timeout
+                                process.stderr.write(`← ${tag} ⏱️ ${toolName} timed out after ${perToolTimeoutMs / 1000}s\n`);
+                                reject(new Error(`Request timeout: ${toolName} did not complete within ${perToolTimeoutMs / 1000}s`));
+                            }
+                        }, perToolTimeoutMs);
+                        responseTimeoutId = timeoutId;
+                        this.pendingRequests.set(internalId, {
+                            resolve: (message) => {
+                                clearTimeout(timeoutId);
+                                // Restore the original client id before resolving
+                                if ('id' in message)
+                                    message.id = originalId;
+                                resolve(message);
+                            },
+                            reject: (err) => {
+                                clearTimeout(timeoutId);
+                                request.id = originalId;
+                                reject(err);
+                            },
+                        });
+                    });
+                    // Send request to MCP server and await response — both inside the
+                    // per-request AsyncLocalStorage context so tool handlers see the correct
+                    // workspacePath for this specific user's request.
+                    const response = await getConfigManager().runWithRequestContext(requestCtx, async () => {
+                        this.onmessage(request);
+                        return await responsePromise;
+                    });
+                    // In HTTP mode the server cannot push notifications before a response
+                    // (request-response only — no SSE). As a workaround we prepend the same
+                    // progress description as the first line of the tool result so the user
+                    // can see what was processed when expanding the "ran <tool>" detail in VS2026.
+                    if (!isSilentProbe && 'result' in response) {
+                        const progressText = buildProgressMessage(toolName, args);
+                        const result = response.result;
+                        const resultContent = result?.content;
+                        if (Array.isArray(resultContent) && resultContent.length > 0) {
+                            const first = resultContent[0];
+                            if (first?.type === 'text' && typeof first.text === 'string') {
+                                // Clone instead of mutating in place: the result object may be
+                                // the same instance stored in the dedup cache — mutating it
+                                // would bake the progress line into the cached copy and every
+                                // dedup hit would then render the line twice.
+                                response.result = {
+                                    ...result,
+                                    content: [
+                                        { ...first, text: `${progressText}\n\n${first.text}` },
+                                        ...resultContent.slice(1),
+                                    ],
+                                };
+                            }
+                        }
+                    }
+                    // Log response (skip silent probes)
+                    if (!isSilentProbe) {
+                        if ('result' in response) {
+                            const content = response.result?.content?.[0]?.text;
+                            const isError = response.result?.isError === true;
+                            if (content) {
+                                const lines = content.split('\n').filter((l) => l.trim());
+                                if (isError) {
+                                    // For errors show up to 4 lines so type-mismatch hints are visible
+                                    const preview = lines.slice(0, 4).map((l) => l.substring(0, 100)).join(' | ');
+                                    process.stdout.write(`← ${tag} ❌ ${preview}\n`);
+                                }
+                                else {
+                                    const firstLine = lines[0].substring(0, 100);
+                                    // For file-creation tools also append the path/warning line so it's visible
+                                    const extraLine = lines.find((l) => l.startsWith('📁 Path:') || l.startsWith('⚠️ addToProject'));
+                                    const extra = extraLine ? ` | ${extraLine.substring(0, 100)}` : '';
+                                    process.stdout.write(`← ${tag} ${firstLine}${extra}\n`);
+                                }
+                            }
+                            else {
+                                process.stdout.write(`← ${tag} ✓ Success\n`);
+                            }
+                        }
+                        else if ('error' in response) {
+                            const errorMsg = response.error?.message || 'Unknown error';
+                            process.stdout.write(`← ${tag} ❌ ${errorMsg.substring(0, 100)}\n`);
+                        }
+                    }
+                    // Send JSON response and explicitly close to signal completion
+                    res.status(200)
+                        .setHeader('Content-Type', 'application/json')
+                        .send(JSON.stringify(response))
+                        .end();
+                }
+                else {
+                    res.status(500).json({
+                        jsonrpc: '2.0',
+                        error: {
+                            code: -32603,
+                            message: 'Transport not connected',
+                        },
+                        id: request.id,
+                    });
+                }
+            }
+            catch (error) {
+                const errorMsg = error instanceof Error ? error.message : String(error);
+                process.stderr.write(`← Transport error: ${errorMsg}\n`);
+                // Clean up the pending request using internalId (the Map key after the id swap)
+                if (internalId) {
+                    this.pendingRequests.delete(internalId);
+                }
+                if (responseTimeoutId) {
+                    clearTimeout(responseTimeoutId);
+                }
+                if (!res.headersSent) {
+                    res.status(500).json({
+                        jsonrpc: '2.0',
+                        error: {
+                            code: -32603,
+                            message: error instanceof Error ? error.message : 'Internal error',
+                        },
+                        id: clientRequestId,
+                    });
+                }
+            }
+        });
+        // Health check
+        this.app.get('/health', (_req, res) => {
+            res.json({
+                status: 'healthy',
+                timestamp: new Date().toISOString(),
+                // Cached-only: a health probe must never trigger a 30-60 s COUNT scan.
+                symbols: this.context.symbolIndex.getCachedSymbolCounts()?.total ?? 0,
+            });
+        });
+    }
+}
+// Factory function
+export function createStreamableHttpTransport(server, app, context) {
+    return new CustomHttpTransport(server, app, context);
+}
+//# sourceMappingURL=transport.js.map
