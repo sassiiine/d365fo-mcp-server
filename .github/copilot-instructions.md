@@ -124,10 +124,9 @@ Consequences worth internalising, because each one otherwise reads as a bug:
 23. **A generate that returns `isError` has failed validation.** The XML is
     known-defective — the response says which rule and why. Fix the inputs and
     generate again. Never write it to disk because it "looks fine".
-24. **Creating a MODEL is not a tool.** No MCP tool creates a model, a
-    `.rnrproj`, or the PackagesLocalDirectory link. If the target model does not
-    exist, stop and tell the user to run `scripts/setup-model.ps1` — do not
-    attempt it with file operations.
+24. **Create a missing MODEL with `create_d365fo_model`.** Objects cannot be
+    written into a model that does not exist, and the failure names the OBJECT,
+    not the model. If the target model is absent, create it and carry on.
 
 ## Full Instructions
 

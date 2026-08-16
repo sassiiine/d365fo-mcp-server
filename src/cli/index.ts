@@ -21,6 +21,7 @@
 import { Command } from 'commander';
 import { configCommand } from './commands/config.js';
 import { connectCommand } from './commands/connect.js';
+import { onboardCommand } from './commands/onboard.js';
 import { doctorCommand } from './commands/doctor.js';
 import { indexCommand } from './commands/indexCmd.js';
 import { instanceAddCommand, instanceListCommand, instanceUpgradeCommand } from './commands/instance.js';
@@ -40,6 +41,15 @@ program
   .name('d365fo-mcp')
   .description('Manage the D365 F&O MCP Server: setup, updates, instances, index builds')
   .version(VERSION);
+
+program.command('onboard')
+  .requiredOption('-k, --api-key <key>', 'your customer API key for the hosted server')
+  .option('-u, --url <url>', 'hosted server URL (defaults to the production one)')
+  .option('-m, --model <model>', 'target model; detected by AOT layer when omitted')
+  .option('-p, --packages-path <path>', 'PackagesLocalDirectory; detected when omitted')
+  .option('-c, --config <path>', 'MCP client config to write (defaults to VS Code user config)')
+  .description('Connect this machine to the hosted server (one command, no scripts)')
+  .action(onboardCommand);
 
 program.command('connect')
   .argument('[url]', 'URL of the deployed server (e.g. https://your-server.azurewebsites.net)')
