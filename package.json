@@ -12,7 +12,6 @@
     "!dist/**/*.map",
     "!dist/eval/**",
     ".github/copilot-instructions.md",
-    "scripts/onboard-agent.ps1",
     "bridge/D365MetadataBridge",
     "!bridge/D365MetadataBridge/bin/**",
     "!bridge/D365MetadataBridge/obj/**"

@@ -46,28 +46,29 @@ Refresh the tarball on the `release` branch with `npm run build && npm pack`.
 Then point it at the hosted server:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\onboard-agent.ps1 -ApiKey <customer-key> -ModelName <their-model>
+d365fo-mcp onboard --api-key <customer-key>
 ```
 
 The customer needs no Google account and no `gcloud`. Their API key is the only
 credential.
 
-`onboard-agent.ps1` resolves the agent from a checkout when run inside one, and
-otherwise from the global npm install, so the same script serves development and
-customer machines.
+No model argument is needed. The command detects the packages root by scanning
+volumes (the drive letter varies by VM image) and lists the custom models it
+finds by AOT layer; pinning one is optional because the assistant can be told
+which model to use, or asked to create one with `create_d365fo_model`.
 
 Nothing about the hosted half ships here: the index, the generation logic, the
 validator and the knowledge stay on the server. What lands on the customer's
 disk writes files and runs `xppc` — which has to be local, because that is where
 `PackagesLocalDirectory` and the AOS are.
 
-It checks Node 24+ (`node:sqlite` is core only from 24), locates
-`AosService\PackagesLocalDirectory` by scanning volumes (the drive letter varies
-by VM image), identifies custom models by AOT **layer** in the Descriptor XML
-(Microsoft ships at layer 0; customer code sits at 14), probes the hosted server,
-and writes an MCP client config registering both servers.
-
 Then restart VS Code and confirm both appear in the MCP panel.
+
+There are no PowerShell scripts left in this flow. Both that existed
+(`setup-model.ps1`, `onboard-agent.ps1`) duplicated logic that now lives in
+TypeScript — `create_d365fo_model` and `d365fo-mcp onboard` — and the duplication
+was not theoretical: the script and the tool derived a model's `Id` differently,
+so the same model name got a different Id depending on which one created it.
 
 ### Issuing the key
 
