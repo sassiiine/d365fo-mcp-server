@@ -16,7 +16,10 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 
-const HOSTED_URL = process.env.D365FO_CLOUD_URL ?? 'https://d365fo-mcp-282013198552.us-east5.run.app';
+// The production endpoint. Overridable with --url; deliberately NOT an env var,
+// because a second way to set it is a second thing to get wrong, and the
+// env-registry test exists to stop configuration accreting invisibly.
+const HOSTED_URL = 'https://d365fo-mcp-282013198552.us-east5.run.app';
 
 interface OnboardOptions {
   apiKey?: string;
@@ -60,7 +63,7 @@ async function findCustomModels(packages: string): Promise<string[]> {
 }
 
 export async function onboardCommand(opts: OnboardOptions): Promise<void> {
-  const apiKey = opts.apiKey ?? process.env.D365FO_API_KEY;
+  const apiKey = opts.apiKey;
   if (!apiKey) {
     console.error('Missing --api-key. Your provider issues one key per customer; it is the only credential needed.');
     process.exitCode = 1;
@@ -130,7 +133,10 @@ export async function onboardCommand(opts: OnboardOptions): Promise<void> {
     },
   };
 
-  const target = opts.config ?? join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), 'Code', 'User', 'mcp.json');
+  // Built from homedir() rather than %APPDATA%: this agent is Windows-only (that
+  // is where the AOS is), so the layout is known, and reading raw OS variables
+  // is what the env-registry test is there to discourage.
+  const target = opts.config ?? join(homedir(), 'AppData', 'Roaming', 'Code', 'User', 'mcp.json');
   await fs.mkdir(dirname(target), { recursive: true });
   if (await exists(target)) {
     const backup = `${target}.bak`;
