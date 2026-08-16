@@ -541,6 +541,44 @@ export declare const toolSchemas: ({
         required: never[];
     };
 } | {
+    readonly name: 'create_d365fo_model';
+    readonly description: string;
+    readonly inputSchema: {
+        readonly type: 'object';
+        readonly properties: {
+            readonly modelName: {
+                readonly type: 'string';
+                readonly description: 'Letters/digits/underscore, starting with a letter. Use your prefix.';
+            };
+            readonly repoRoot: {
+                readonly type: 'string';
+                readonly description: string;
+            };
+            readonly description: {
+                readonly type: 'string';
+            };
+            readonly publisher: {
+                readonly type: 'string';
+            };
+            readonly layer: {
+                readonly type: 'number';
+                readonly description: 'AOT layer; 14 (USR) for customer code.';
+            };
+            readonly moduleReferences: {
+                readonly type: 'array';
+                readonly items: {
+                    readonly type: 'string';
+                };
+                readonly description: 'Modules to reference. Default covers the standard EDTs.';
+            };
+            readonly packagesPath: {
+                readonly type: 'string';
+                readonly description: 'PackagesLocalDirectory override.';
+            };
+        };
+        readonly required: readonly ['modelName'];
+    };
+} | {
     name: string;
     description: string;
     inputSchema: {

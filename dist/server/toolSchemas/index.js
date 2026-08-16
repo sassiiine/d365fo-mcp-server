@@ -15,6 +15,7 @@ import { securityInfoTool } from './securityInfo.js';
 import { extensionInfoTool } from './extensionInfo.js';
 import { validateObjectNamingTool } from './validateObjectNaming.js';
 import { getWorkspaceInfoTool } from './getWorkspaceInfo.js';
+import { createModelTool } from './createModel.js';
 import { verifyD365foProjectTool } from './verifyD365foProject.js';
 import { updateSymbolIndexTool } from './updateSymbolIndex.js';
 import { buildD365foProjectTool } from './buildD365foProject.js';
@@ -39,6 +40,7 @@ export const toolSchemas = [
     extensionInfoTool,
     validateObjectNamingTool,
     getWorkspaceInfoTool,
+    createModelTool,
     verifyD365foProjectTool,
     updateSymbolIndexTool,
     buildD365foProjectTool,

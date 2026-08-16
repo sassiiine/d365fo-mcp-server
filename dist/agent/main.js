@@ -22,6 +22,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { promises as fs } from 'node:fs';
 import { writeObject, resolveObjectPath } from './writeObject.js';
 import { AOT_FOLDERS } from './aotFolders.js';
+import { createModel } from './createModel.js';
 const VERSION = '1.0.0';
 const OBJECT_TYPES = Object.keys(AOT_FOLDERS);
 const TOOLS = [
@@ -78,6 +79,32 @@ const TOOLS = [
                 },
             },
             required: ['objects'],
+        },
+    },
+    {
+        name: 'create_d365fo_model',
+        description: 'Create a new D365FO model on this machine: descriptor, AOT folder skeleton, Visual Studio project, and the ' +
+            'PackagesLocalDirectory link. Use this when the target model does not exist yet — objects cannot be written ' +
+            'into a model that has not been created.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                modelName: { type: 'string', description: 'Letters, digits and underscores; use your own prefix.' },
+                repoRoot: {
+                    type: 'string',
+                    description: 'Metadata repo root containing Metadata\\ and Projects\\. Given, the model is created there and ' +
+                        'junctioned into PackagesLocalDirectory so it is under source control. Omitted, it is created ' +
+                        'directly under PackagesLocalDirectory.',
+                },
+                description: { type: 'string' },
+                publisher: { type: 'string' },
+                layer: { type: 'number', description: 'AOT layer; 14 (USR) unless you have a reason.' },
+                moduleReferences: {
+                    type: 'array', items: { type: 'string' },
+                    description: 'Modules the model may reference. Defaults cover the standard EDTs.',
+                },
+            },
+            required: ['modelName'],
         },
     },
     {
@@ -158,6 +185,22 @@ async function handle(name, args) {
                 }
             }
             return text(lines.join('\n') || 'No objects given.', lines.some(l => l.startsWith('MISSING')));
+        }
+        case 'create_d365fo_model': {
+            const r = await createModel({
+                modelName: args.modelName,
+                repoRoot: args.repoRoot,
+                description: args.description,
+                publisher: args.publisher,
+                layer: args.layer,
+                moduleReferences: args.moduleReferences,
+            });
+            return text(`Created model ${r.modelName} (id ${r.modelId})\n` +
+                `Metadata: ${r.metadataPath}\n` +
+                `Project : ${r.projectPath}\n` +
+                (r.linkedFrom ? `Linked  : ${r.linkedFrom}\n` : '') +
+                (r.warnings.length ? `\n${r.warnings.map(w => `- ${w}`).join('\n')}\n` : '') +
+                `\nObjects can now be written into it with d365fo_file.`);
         }
         case 'get_workspace_info':
             return text(`D365FO thin agent v${VERSION}\n\n` +

@@ -38,6 +38,7 @@ export const LOCAL_TOOLS = new Set([
     'review_workspace_changes',
     'undo_last_modification',
     'get_workspace_info',
+    'create_d365fo_model',
 ]);
 /**
  * Tools exposed in EVERY server mode, bypassing the LOCAL_TOOLS partition,
@@ -110,6 +111,7 @@ export const CORE_TOOLS = new Set([
     'get_knowledge',
     'get_workspace_info',
     // write
+    'create_d365fo_model',
     'validate_object_naming',
     'generate_object',
     'd365fo_file',

@@ -29,6 +29,7 @@ import { undoLastModificationTool } from './sdlc/undoLastModification.js';
 import { validateCodeTool } from './analysis/validateCode.js';
 import { prepareTool } from './prepare/prepare.js';
 import { getWorkspaceInfoTool } from './readers/getWorkspaceInfo.js';
+import { createModelToolHandler } from './sdlc/createModelTool.js';
 import { recordToolStart, startMetricsLogging, recordCallSequence, reportSlowCall } from '../utils/toolMetrics.js';
 import { DEDUP_EXCLUDED_TOOLS, DEDUP_TTL_MS, dedupKey, getDedupedResult, storeDedupResult, appendNote, getInFlight, registerInFlight, clearInFlight, } from '../utils/callDedup.js';
 import { truncateOnBlockBoundary } from '../utils/payloadBudget.js';
@@ -309,6 +310,8 @@ export function registerToolHandler(server, context) {
                             return prepareTool(request, context);
                         case 'get_workspace_info':
                             return getWorkspaceInfoTool(request, context);
+                        case 'create_d365fo_model':
+                            return createModelToolHandler(request, context);
                         default:
                             return {
                                 content: [
