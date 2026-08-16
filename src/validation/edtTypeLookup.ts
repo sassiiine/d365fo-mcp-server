@@ -68,3 +68,44 @@ export function makeEdtTypeLookup(): EdtTypeLookup | null {
   const cfg = readNeonConfig();
   return cfg ? new NeonEdtTypes(cfg.connectionString) : null;
 }
+
+/** Everything the backfill recorded about one EDT. */
+export interface EdtTypeRecord {
+  name: string;
+  baseType: string;
+  extends: string | null;
+  model: string | null;
+}
+
+let describePool: Pool | null | undefined;
+
+/**
+ * Full record for one EDT, for callers that want more than the base type.
+ *
+ * Exists because `get_object_info(objectType="edt")` had two sources - the C#
+ * bridge and local SQLite - and on a cloud instance it has NEITHER, so it
+ * answered "no data available" for EDTs that plainly exist (AmountMST among
+ * them). arch_a.edt_types is a third source that works precisely where the other
+ * two cannot.
+ *
+ * Returns null when Neon is unconfigured or the EDT is unknown; the caller still
+ * distinguishes "no data" from "does not exist".
+ */
+export async function describeEdt(name: string): Promise<EdtTypeRecord | null> {
+  if (describePool === undefined) {
+    const cfg = readNeonConfig();
+    describePool = cfg ? new Pool({ connectionString: cfg.connectionString, max: 2 }) : null;
+    describePool?.on('error', () => { /* pg reconnects on demand */ });
+  }
+  if (!describePool) return null;
+  try {
+    const { rows } = await describePool.query<{ name: string; base_type: string; extends: string | null; model: string | null }>(
+      `SELECT name, base_type, extends, model FROM arch_a.edt_types WHERE name_lower = $1`,
+      [name.toLowerCase()],
+    );
+    const r = rows[0];
+    return r ? { name: r.name, baseType: r.base_type, extends: r.extends, model: r.model } : null;
+  } catch {
+    return null;
+  }
+}

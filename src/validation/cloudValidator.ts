@@ -238,6 +238,83 @@ export async function validateGeneratedXml(
   return findings.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'error' ? -1 : 1));
 }
 
+/** One document in a set being validated together. */
+export interface ObjectDoc {
+  objectType: string;
+  name: string;
+  xml: string;
+}
+
+/** Field group names declared on a table document. */
+function tableFieldGroups(xml: string): Set<string> {
+  const groups = new Set<string>();
+  for (const g of xml.matchAll(/<AxTableFieldGroup>([\s\S]*?)<\/AxTableFieldGroup>/gi)) {
+    const n = /<Name>([^<]+)<\/Name>/i.exec(g[1])?.[1]?.trim();
+    if (n) groups.add(n.toLowerCase());
+  }
+  return groups;
+}
+
+/** <DataGroup> references made by a form document, with the control name. */
+function formDataGroupRefs(xml: string): Array<{ group: string; control: string; dataSource: string | null }> {
+  const refs: Array<{ group: string; control: string; dataSource: string | null }> = [];
+  for (const c of xml.matchAll(/<AxFormControl\b[^>]*>([\s\S]*?)<\/AxFormControl>/gi)) {
+    const own = c[1].split(/<AxFormControl\b/i)[0];
+    const group = /<DataGroup>([^<]+)<\/DataGroup>/i.exec(own)?.[1]?.trim();
+    if (!group) continue;
+    refs.push({
+      group,
+      control: /<Name>([^<]*)<\/Name>/i.exec(own)?.[1]?.trim() ?? '(unnamed)',
+      dataSource: /<DataSource>([^<]+)<\/DataSource>/i.exec(own)?.[1]?.trim() ?? null,
+    });
+  }
+  return refs;
+}
+
+/**
+ * Rules that need MORE THAN ONE object to be decidable.
+ *
+ * A form and the table it binds are each valid alone and invalid together: the
+ * form referenced field group 'Overview', the table declared only the empty
+ * Auto* groups, and xppc blamed the FORM for something caused by the TABLE.
+ * Single-document validation cannot see that by construction, so this pass takes
+ * the whole set the caller is about to write.
+ *
+ * Only pairs present in the SET are judged. A form whose table is not included
+ * is not accused of anything - the table may exist already and be perfectly
+ * correct, and guessing would make the findings untrustworthy.
+ */
+export function validateObjectSet(docs: ObjectDoc[]): ValidationFinding[] {
+  const findings: ValidationFinding[] = [];
+  const tables = new Map<string, Set<string>>();
+  for (const d of docs) {
+    if (/^table$/i.test(d.objectType)) tables.set(d.name.toLowerCase(), tableFieldGroups(d.xml));
+  }
+
+  for (const d of docs) {
+    if (!/^form$/i.test(d.objectType)) continue;
+    for (const ref of formDataGroupRefs(d.xml)) {
+      const groups = ref.dataSource ? tables.get(ref.dataSource.toLowerCase()) : undefined;
+      if (!groups) continue; // that table is not in this set - cannot judge
+      if (!groups.has(ref.group.toLowerCase())) {
+        findings.push({
+          severity: 'error',
+          rule: 'datagroup-missing-on-table',
+          location: `${d.name}.Design/${ref.control}`,
+          message:
+            `Form '${d.name}' binds field group '${ref.group}' on table '${ref.dataSource}', ` +
+            `but that table declares no such group (${[...groups].join(', ') || 'none'}).`,
+          hint:
+            `Add a '${ref.group}' field group to ${ref.dataSource}, or bind an existing one. ` +
+            `The compiler reports this against the FORM ("Field group '${ref.group}' does not exist"), ` +
+            `so it sends you looking in the wrong file.`,
+        });
+      }
+    }
+  }
+  return findings;
+}
+
 /** Render findings for a tool response. Empty string when there are none. */
 export function formatFindings(findings: ValidationFinding[]): string {
   if (findings.length === 0) return '';

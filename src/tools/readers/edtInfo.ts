@@ -11,6 +11,7 @@ import { z } from 'zod';
 import type { XppServerContext } from '../../types/context.js';
 import { tryBridgeEdt } from '../../bridge/bridgeAdapter.js';
 import { canonicalSymbolName, lookupSymbolNocase } from '../../utils/symbolLookup.js';
+import { describeEdt } from '../../validation/edtTypeLookup.js';
 
 const GetEdtInfoArgsSchema = z.object({
   edtName: z.string().describe('Name of the Extended Data Type (EDT)'),
@@ -45,15 +46,38 @@ export async function getEdtInfoTool(request: CallToolRequest, context: XppServe
     const sqliteResult = getEdtFromIndex(symbolIndex, edtName, modelName);
     if (sqliteResult) return sqliteResult;
 
+    // Third source: the hosted EDT-type table. On a cloud instance the first two
+    // do not exist at all — no bridge, no local SQLite — so this is the only one
+    // that can answer, and without it get_object_info reported "no data" for
+    // EDTs as ordinary as AmountMST.
+    const cloudEdt = await describeEdt(edtName);
+    if (cloudEdt) {
+      return {
+        content: [{
+          type: 'text',
+          text:
+            `📦 EDT ${cloudEdt.name}\n\n` +
+            `Base type : ${cloudEdt.baseType}\n` +
+            (cloudEdt.extends ? `Extends   : ${cloudEdt.extends}\n` : '') +
+            (cloudEdt.model ? `Model     : ${cloudEdt.model}\n` : '') +
+            `\nSource: hosted index (arch_a.edt_types).\n` +
+            `A table field bound to this EDT must be declared ` +
+            `AxTableField${cloudEdt.baseType[0].toUpperCase()}${cloudEdt.baseType.slice(1)}; ` +
+            `anything else is the "Data type mismatch" the compiler reports without saying which side is wrong.`,
+        }],
+      };
+    }
+
     return {
       content: [{
         type: 'text',
         text:
           `No data available for EDT "${edtName}".\n\n` +
-          `Neither source could answer:\n` +
+          `No source could answer:\n` +
           `  • C# bridge (IMetadataProvider): returned no data — it is either unavailable, ` +
           `or it could not resolve this name.\n` +
-          `  • SQLite symbol index (edt_metadata / symbols): no row for this name.\n\n` +
+          `  • SQLite symbol index (edt_metadata / symbols): no row for this name.\n` +
+          `  • Hosted EDT types (arch_a.edt_types): no row, or Neon is not configured.\n\n` +
           `⚠️ This is "no data", NOT proof the EDT does not exist. Standard EDTs are routinely ` +
           `resolvable through other paths — before changing working code, cross-check with ` +
           `search(type="edt", query="${edtName}") or validate_code(mode="references").\n` +
