@@ -31,8 +31,17 @@ multi-gigabyte local index — precisely the asset being sold as a service.
 Install the agent — no git, no clone, no build:
 
 ```powershell
-npm i -g github:sassiiine/d365fo-mcp-server
+npm i -g https://raw.githubusercontent.com/sassiiine/d365fo-mcp-server/release/d365fo-mcp-1.11.0.tgz
 ```
+
+NOT `npm i -g github:...`. A GLOBAL git install fails on Windows with
+`CwdError: ENOENT: Cannot cd into .../node_modules/d365fo-mcp` (npm 11 cannot
+create its own extraction target), and even when it gets that far it does not
+install devDependencies, so the build step has no TypeScript. A LOCAL
+`npm install --prefix` does work, which is exactly why this went unnoticed.
+The tarball needs neither git nor a compiler.
+
+Refresh the tarball on the `release` branch with `npm run build && npm pack`.
 
 Then point it at the hosted server:
 

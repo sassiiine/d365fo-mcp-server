@@ -87,7 +87,13 @@ const CHARS_PER_TOKEN = 4;
 // limit, message, severity, itemSpecific, and the elementType/elementName
 // fallback for deriving a path — stay in the zod handler schema, the same trade
 // already made for `labels`.
-const TOTAL_BUDGET = 51_700;
+// Raised by ~1,100 chars for create_d365fo_model. Creating a model was a
+// PowerShell script the customer ran by hand, so an agent that found the target
+// model missing could only stop and explain - and writing an object into a
+// model that does not exist fails with an error naming the object, not the
+// model. Its schema is deliberately terse (seven fields, one line each); the
+// detail lives in the tool's response, which is only paid for when it is used.
+const TOTAL_BUDGET = 52_800;
 const LARGEST_TOOL_BUDGET = 5_300;
 
 async function getTools(): Promise<Array<{ name: string }>> {
@@ -108,7 +114,7 @@ describe('tool schema token budget', () => {
       `[tool-budget] ${tools.length} tools · ${chars} chars ≈ ${Math.round(chars / CHARS_PER_TOKEN)} tokens ` +
       `(budget ${TOTAL_BUDGET} chars)`,
     );
-    expect(tools.length).toBe(23);
+    expect(tools.length).toBe(24);
     expect(chars).toBeLessThan(TOTAL_BUDGET);
   });
 

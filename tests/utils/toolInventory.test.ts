@@ -33,8 +33,8 @@ describe('tool inventory contract', () => {
     // 23 since get_method and suggest_edt were unpublished: their contracts moved
     // into get_object_info(options.method) and prepare(fieldsHint), both of which
     // already had the object in hand. Their handlers stay routable.
-    expect(mcpServerToolNames).toHaveLength(23);
-    expect(startupCatalogToolNames).toHaveLength(23);
+    expect(mcpServerToolNames).toHaveLength(24);
+    expect(startupCatalogToolNames).toHaveLength(24);
   });
 
   it('never states a tool count that disagrees with the published inventory', () => {
@@ -150,7 +150,7 @@ describe('tool inventory contract', () => {
       expect(publishedTools.has(toolName)).toBe(true);
     }
 
-    expect(LOCAL_TOOLS.size).toBe(9);
+    expect(LOCAL_TOOLS.size).toBe(10);
     expect(mcpServerToolNames.filter(name => !LOCAL_TOOLS.has(name))).toHaveLength(14);
   });
 

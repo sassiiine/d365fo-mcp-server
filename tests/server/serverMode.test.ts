@@ -76,7 +76,7 @@ describe('tool profile', () => {
   it('core publishes exactly the create-and-build loop', () => {
     const core = published.filter(name => isToolInProfile('core', name, NONE));
     expect(core.sort()).toEqual([...CORE_TOOLS].sort());
-    expect(core).toHaveLength(18);
+    expect(core).toHaveLength(19);
   });
 
   it('every CORE_TOOLS entry is a published tool (no ghosts after a rename)', () => {

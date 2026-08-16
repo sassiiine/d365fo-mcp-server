@@ -37,6 +37,7 @@ import { undoLastModificationTool } from './sdlc/undoLastModification.js';
 import { validateCodeTool } from './analysis/validateCode.js';
 import { prepareTool } from './prepare/prepare.js';
 import { getWorkspaceInfoTool } from './readers/getWorkspaceInfo.js';
+import { createModelToolHandler } from './sdlc/createModelTool.js';
 import { recordToolStart, startMetricsLogging, recordCallSequence, reportSlowCall } from '../utils/toolMetrics.js';
 import {
   DEDUP_EXCLUDED_TOOLS, DEDUP_TTL_MS,
@@ -352,6 +353,8 @@ export function registerToolHandler(server: Server, context: XppServerContext): 
         return prepareTool(request, context);
       case 'get_workspace_info':
         return getWorkspaceInfoTool(request, context);
+      case 'create_d365fo_model':
+        return createModelToolHandler(request, context);
       default:
         return {
           content: [
