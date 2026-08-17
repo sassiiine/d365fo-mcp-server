@@ -352,6 +352,22 @@ export function applyObjectPrefix(objectName: string, prefix: string, modelName?
     return objectName;
   }
 
+  // The caller already prefixed the name, just not with OUR prefix.
+  //
+  // The two checks above only recognise the prefix this model resolved to, so
+  // asking for "Ex_V3_RptTest" in a model whose resolved prefix is "Ex_Test1"
+  // produced "Ex_Test1Ex_V3_RptTest" — and every object derived from it
+  // (…Tmp, …DP, …Contract, …Controller) inherited the mangling. Nothing said so.
+  //
+  // A leading `Token_` is how a D365FO custom object announces its prefix, so
+  // treat it as deliberate and leave the name alone. Prefixing exists to stop
+  // unprefixed names reaching the AOT, not to overrule a caller who chose one.
+  // Names with no such token (`InventByZones`) are unaffected and still get the
+  // model's prefix.
+  if (/^[A-Za-z][A-Za-z0-9]*_/.test(objectName)) {
+    return objectName;
+  }
+
   const normalizedName = objectName.charAt(0).toUpperCase() + objectName.slice(1);
   return `${regularPrefix}${normalizedName}`;
 }

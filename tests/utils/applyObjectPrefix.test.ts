@@ -224,4 +224,29 @@ describe('applyObjectPrefix — model-name style (EXTENSION_NAMING_STYLE=model-n
     expect(applyObjectPrefix('CustTable.Extension', 'CR', 'ContosoRobotics'))
       .toBe('CustTable.CRExtension');
   });
+
+  describe('a name the caller already prefixed', () => {
+    // Regression: asking for "Ex_V3_RptTest" in a model whose resolved prefix was
+    // "Ex_Test1" produced "Ex_Test1Ex_V3_RptTest", and the report scaffold's five
+    // derived objects (…Tmp, …DP, …Contract, …Controller, menu item) all inherited
+    // it. Nothing warned. Prefixing exists to stop UNprefixed names reaching the
+    // AOT, not to overrule a caller who chose one.
+    it('leaves an already-prefixed name alone even when the prefix differs', () => {
+      process.env.EXTENSION_PREFIX = 'Ex_Test1';
+      delete process.env.EXTENSION_NAMING_STYLE;
+      expect(applyObjectPrefix('Ex_V3_RptTest', 'Ex_Test1')).toBe('Ex_V3_RptTest');
+    });
+
+    it('still prefixes a bare name', () => {
+      process.env.EXTENSION_PREFIX = 'Ex_Test1';
+      delete process.env.EXTENSION_NAMING_STYLE;
+      expect(applyObjectPrefix('InventByZones', 'Ex_Test1')).toBe('Ex_Test1InventByZones');
+    });
+
+    it("is idempotent for the model own prefix", () => {
+      process.env.EXTENSION_PREFIX = 'CR_';
+      delete process.env.EXTENSION_NAMING_STYLE;
+      expect(applyObjectPrefix('CR_MyTable', 'CR_')).toBe('CR_MyTable');
+    });
+  });
 });
