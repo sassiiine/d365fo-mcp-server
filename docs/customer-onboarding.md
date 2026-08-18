@@ -31,22 +31,22 @@ multi-gigabyte local index — precisely the asset being sold as a service.
 Install the agent — no git, no clone, no build:
 
 ```powershell
-npm i -g https://raw.githubusercontent.com/sassiiine/d365fo-mcp-server/release/d365fo-mcp-1.11.0.tgz
+npm i -g d365fo-mcp-agent
 ```
 
-NOT `npm i -g github:...`. A GLOBAL git install fails on Windows with
-`CwdError: ENOENT: Cannot cd into .../node_modules/d365fo-mcp` (npm 11 cannot
-create its own extraction target), and even when it gets that far it does not
-install devDependencies, so the build step has no TypeScript. A LOCAL
-`npm install --prefix` does work, which is exactly why this went unnoticed.
-The tarball needs neither git nor a compiler.
+Published to npm rather than served from the repo, because the repo is private:
+a raw.githubusercontent URL needs a token once visibility changes, and handing
+customers a GitHub token to install a client is not a thing to do. npm ships only
+what `files` lists, so the source stays private while the package stays public.
 
-Refresh the tarball on the `release` branch with `npm run build && npm pack`.
+The name is NOT `d365fo-mcp` — that belongs to the upstream project on npm, and
+its package also claims a `d365fo-mcp` command, so sharing either would collide
+on a machine that has both.
 
 Then point it at the hosted server:
 
 ```powershell
-d365fo-mcp onboard --api-key <customer-key>
+d365fo-agent onboard --api-key <customer-key>
 ```
 
 The customer needs no Google account and no `gcloud`. Their API key is the only
@@ -66,7 +66,7 @@ Then restart VS Code and confirm both appear in the MCP panel.
 
 There are no PowerShell scripts left in this flow. Both that existed
 (`setup-model.ps1`, `onboard-agent.ps1`) duplicated logic that now lives in
-TypeScript — `create_d365fo_model` and `d365fo-mcp onboard` — and the duplication
+TypeScript — `create_d365fo_model` and `d365fo-agent onboard` — and the duplication
 was not theoretical: the script and the tool derived a model's `Id` differently,
 so the same model name got a different Id depending on which one created it.
 

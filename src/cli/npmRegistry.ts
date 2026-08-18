@@ -14,7 +14,10 @@
  */
 import { VERSION } from '../version.js';
 
-const PACKAGE_NAME = 'd365fo-mcp';
+// This fork publishes as d365fo-mcp-agent. `d365fo-mcp` on npm belongs to the
+// upstream project, so leaving it here made the update check poll THEIR releases
+// and offer a customer an upgrade to a different product.
+const PACKAGE_NAME = 'd365fo-mcp-agent';
 
 /** Default registry, overridable the same way npm itself allows. */
 function registryBase(): string {

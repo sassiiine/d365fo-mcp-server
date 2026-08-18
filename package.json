@@ -1,11 +1,11 @@
 {
-  "name": "d365fo-mcp",
+  "name": "d365fo-mcp-agent",
   "version": "1.11.0",
-  "description": "MCP Server for X++ Code Completion in D365 Finance & Operations",
+  "description": "Hosted D365FO X++ code intelligence — local agent for the cloud MCP server",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "d365fo-mcp": "dist/cli/index.js"
+    "d365fo-agent": "dist/cli/index.js"
   },
   "files": [
     "dist",
@@ -18,11 +18,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dynamics365ninja/d365fo-mcp-server.git"
+    "url": "git+https://github.com/sassiiine/d365fo-mcp-server.git"
   },
-  "homepage": "https://github.com/dynamics365ninja/d365fo-mcp-server#readme",
+  "homepage": "https://github.com/sassiiine/d365fo-mcp-server#readme",
   "bugs": {
-    "url": "https://github.com/dynamics365ninja/d365fo-mcp-server/issues"
+    "url": "https://github.com/sassiiine/d365fo-mcp-server/issues"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -112,5 +112,8 @@
   },
   "allowScripts": {
     "esbuild@0.28.2": true
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -38,7 +38,7 @@ import { KNOWN_FORMATS } from './session/sessionLog.js';
 const program = new Command();
 
 program
-  .name('d365fo-mcp')
+  .name('d365fo-agent')
   .description('Manage the D365 F&O MCP Server: setup, updates, instances, index builds')
   .version(VERSION);
 
