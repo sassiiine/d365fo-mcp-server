@@ -21,8 +21,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import { promises as fs } from 'node:fs';
+import { EOL } from 'node:os';
 import { writeObject, resolveObjectPath } from './writeObject.js';
 import { AOT_FOLDERS } from './aotFolders.js';
+import { buildModel } from './buildModel.js';
 import { createModel } from './createModel.js';
 
 const VERSION = '1.0.0';
@@ -125,31 +127,43 @@ const TOOLS = [
 
 const text = (s: string, isError = false) => ({ content: [{ type: 'text', text: s }], ...(isError ? { isError: true } : {}) });
 
-/**
- * NOT YET PORTED - deliberately refuses rather than guessing.
- *
- * A first attempt here hand-rolled the xppc invocation and got it wrong in ways
- * that would have produced builds that LIE: it passed `-metadata` without
- * `-compilermetadata`, inverted `-incremental` (a full build OMITS the flag),
- * used `-xmlLog` where xppc wants `-log`, looked for xppc.exe under the custom
- * packages root instead of the Microsoft one, and skipped label compilation
- * entirely - which makes correct source report BPErrorUnknownLabel.
- *
- * A build tool that reports success incorrectly is worse than no build tool, so
- * this returns an error until src/tools/sdlc/buildProject.ts is extracted into a
- * lean module. That extraction is small in principle (arguments, labelc, spawn,
- * wait) and the only thing it must shed is the knowledge-base import used to
- * enrich diagnostics - which belongs on the hosted server anyway, since
- * explaining a compiler error is exactly the kind of work worth hosting.
- */
-async function runBuild(_modelName: string, _fullBuild: boolean): Promise<string> {
-  return (
-    'Build is not available in the thin agent yet.\n\n' +
-    'Use the full package for builds until the compiler invocation is extracted:\n' +
-    '  npm i -g github:sassiiine/d365fo-mcp-server\n' +
-    'and run it with MCP_SERVER_MODE=write-only.\n\n' +
-    'Writing objects through this agent works and is unaffected.'
-  );
+/** Compile the model. Diagnostics are the compiler's own words; see buildModel.ts. */
+async function runBuild(modelName: string, fullBuild: boolean): Promise<string> {
+  const packagesPath = process.env.D365FO_PACKAGE_PATH;
+  if (!packagesPath) return 'D365FO_PACKAGE_PATH is not set; cannot locate the packages root.';
+
+  const r = await buildModel({ modelName, packagesPath, fullBuild });
+  const head = r.ok
+    ? `Build succeeded - ${modelName}, ${r.fullBuild ? 'FULL' : 'incremental'}, ${(r.durationMs / 1000).toFixed(0)}s`
+    : `BUILD FAILED - ${modelName}, ${r.fullBuild ? 'FULL' : 'incremental'}, ${(r.durationMs / 1000).toFixed(0)}s`;
+
+  const lines = [head, r.labels, ''];
+  if (!r.fullBuild) {
+    lines.push(
+      'Incremental: unchanged elements were NOT recompiled, so a clean result here says',
+      'nothing about the model as a whole. Re-run with fullBuild=true before calling the',
+      'task done.', '',
+    );
+  }
+  if (r.errors.length) {
+    lines.push(`${r.errors.length} error(s):`);
+    for (const d of r.errors.slice(0, 25)) {
+      const where = [d.object, d.member].filter(Boolean).join('/');
+      const at = d.line ? ` (line ${d.line}${d.column ? ', col ' + d.column : ''})` : '';
+      lines.push(`  ${where || d.kind || '(no location)'}${at}: ${d.message}`);
+    }
+    if (r.errors.length > 25) lines.push(`  … ${r.errors.length - 25} more`);
+  }
+  // xppc counted errors this parser could not itemise — say so rather than
+  // present a short list as if it were the whole story.
+  if (r.reportedErrorCount !== null && r.reportedErrorCount > r.errors.length) {
+    lines.push('', `xppc counted ${r.reportedErrorCount} error(s) but only ${r.errors.length} could be parsed.`,
+      'Ask the hosted server to interpret the raw log below.');
+  }
+  if (r.warnings.length) lines.push('', `${r.warnings.length} warning(s).`);
+
+  lines.push('', '--- xppc log (tail) ---', r.log.slice(-4000));
+  return lines.join(EOL);
 }
 
 async function handle(name: string, args: Record<string, unknown>) {
@@ -179,14 +193,8 @@ async function handle(name: string, args: Record<string, unknown>) {
     case 'build_d365fo_project': {
       if (!model) return text('No model. Pass modelName or set D365FO_MODEL_NAME.', true);
       const full = Boolean(args.fullBuild);
-      const log = await runBuild(model, full);
-      const failed = /error|exit [1-9]/i.test(log);
-      return text(
-        `${failed ? 'BUILD FAILED' : 'Build finished'} — ${model}, ${full ? 'FULL' : 'incremental'}\n` +
-        (full ? '' : '\nIncremental: unchanged elements were not recompiled, so this proves nothing about the model as a whole. Re-run with fullBuild=true before calling the task done.\n') +
-        `\n${log.slice(-6000)}`,
-        failed,
-      );
+      const out = await runBuild(model, full);
+      return text(out, /^BUILD FAILED/.test(out));
     }
 
     case 'verify_d365fo_project': {
@@ -215,13 +223,21 @@ async function handle(name: string, args: Record<string, unknown>) {
         layer: args.layer as number | undefined,
         moduleReferences: args.moduleReferences as string[] | undefined,
       });
+      // Creating a model is only ever done in order to build in it, so it
+      // becomes the session default. Without this, every following call fell
+      // back to D365FO_MODEL_NAME and silently wrote into the *previous* model
+      // unless the agent repeated modelName on each one — which looked from the
+      // outside like the tool creating one model and then refusing to move on.
+      process.env.D365FO_MODEL_NAME = r.modelName;
       return text(
-        `Created model ${r.modelName} (id ${r.modelId})\n` +
+        `${r.alreadyExisted ? 'Model already exists' : 'Created model'} ${r.modelName} (id ${r.modelId})\n` +
         `Metadata: ${r.metadataPath}\n` +
         `Project : ${r.projectPath}\n` +
         (r.linkedFrom ? `Linked  : ${r.linkedFrom}\n` : '') +
         (r.warnings.length ? `\n${r.warnings.map(w => `- ${w}`).join('\n')}\n` : '') +
-        `\nObjects can now be written into it with d365fo_file.`,
+        `\n${r.modelName} is now the default model for this session — d365fo_file and ` +
+        `build_d365fo_project will use it unless you pass modelName explicitly.\n` +
+        `Write objects with d365fo_file(projectPath="${r.projectPath}").`,
       );
     }
 

@@ -96,4 +96,38 @@ describe('createModel', () => {
       if (saved) process.env.D365FO_PACKAGE_PATH = saved;
     }
   });
+
+  it('is idempotent: re-creating an existing model returns it instead of throwing', async () => {
+    // The agent creates a model, then fails partway through the objects that
+    // follow. Every retry used to die on the directory its own first attempt
+    // had made, which made a half-built model unrecoverable.
+    await mkdir(packages(), { recursive: true });
+    const first = await createModel({ modelName: 'Tk_Demo', packagesPath: packages() });
+    expect(first.alreadyExisted).toBe(false);
+
+    const second = await createModel({ modelName: 'Tk_Demo', packagesPath: packages() });
+    expect(second.alreadyExisted).toBe(true);
+    expect(second.modelId).toBe(first.modelId);
+    expect(second.projectPath).toBe(first.projectPath);
+    expect(second.created).toEqual([]);
+    expect(second.warnings.join(' ')).toMatch(/already exists/i);
+  });
+
+  it('still refuses a directory that exists but is not a model', async () => {
+    // A name collision with an unrelated package must not be swallowed by the
+    // idempotent path - there is no descriptor, so nothing to return.
+    await mkdir(join(packages(), 'Tk_Demo'), { recursive: true });
+    await expect(createModel({ modelName: 'Tk_Demo', packagesPath: packages() }))
+      .rejects.toThrow(/not a model/i);
+  });
+
+  it('keeps the repo layout when returning an existing model', async () => {
+    const repo = join(root, 'Repo');
+    await mkdir(packages(), { recursive: true });
+    const first = await createModel({ modelName: 'Tk_Demo', packagesPath: packages(), repoRoot: repo });
+    if (!first.linkedFrom) return; // junction unavailable on this filesystem
+    const second = await createModel({ modelName: 'Tk_Demo', packagesPath: packages(), repoRoot: repo });
+    expect(second.alreadyExisted).toBe(true);
+    expect(second.projectPath).toBe(first.projectPath);
+  });
 });

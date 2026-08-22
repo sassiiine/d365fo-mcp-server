@@ -41,6 +41,15 @@ export interface CreateModelResult {
   linkedFrom?: string;
   created: string[];
   warnings: string[];
+  /**
+   * True when the model was already on disk and this call returned it unchanged.
+   *
+   * Creation is idempotent because the caller is an agent partway through a
+   * multi-object build: a run that failed after the model existed used to be
+   * unrecoverable, since every retry threw on the directory its own first
+   * attempt had made.
+   */
+  alreadyExisted: boolean;
 }
 
 /**
@@ -147,7 +156,32 @@ export async function createModel(req: CreateModelRequest): Promise<CreateModelR
 
   const link = join(packages, name);
   if (await exists(link)) {
-    throw new Error(`${link} already exists — a model called '${name}' is already visible to the AOS.`);
+    // A descriptor is what makes the directory a model rather than a name
+    // collision. Returning the existing one keeps a retry cheap; throwing on a
+    // directory that is *not* a model still protects an unrelated package.
+    const existingDescriptor = join(link, 'Descriptor', `${name}.xml`);
+    if (await exists(existingDescriptor)) {
+      // `link` may be the model directory or a junction into the repo; either
+      // way the project sits under the layout the caller asked for, not under
+      // the junction, so honour repoRoot here exactly as the create path does.
+      const projectDir = req.repoRoot
+        ? join(req.repoRoot, 'Projects', name, name)
+        : join(link, 'Projects');
+      return {
+        modelName: name,
+        modelId: modelIdFor(name),
+        metadataPath: join(link, name),
+        projectPath: join(projectDir, `${name}.rnrproj`),
+        linkedFrom: req.repoRoot ? link : undefined,
+        created: [],
+        warnings: [`Model '${name}' already exists at ${link}; returning it unchanged.`],
+        alreadyExisted: true,
+      };
+    }
+    throw new Error(
+      `${link} already exists but has no Descriptor\\${name}.xml, so it is not a model. ` +
+      `Remove it or choose another name.`,
+    );
   }
 
   const created: string[] = [];
@@ -204,5 +238,5 @@ export async function createModel(req: CreateModelRequest): Promise<CreateModelR
     }
   }
 
-  return { modelName: name, modelId, metadataPath: modelRoot, projectPath, linkedFrom, created, warnings };
+  return { modelName: name, modelId, metadataPath: modelRoot, projectPath, linkedFrom, created, warnings, alreadyExisted: false };
 }
